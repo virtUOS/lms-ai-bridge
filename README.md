@@ -194,93 +194,34 @@ carries `?forcedownload=1`, and a second query string makes Moodle answer
 **HTTP 200 with a JSON error body** saying the token is missing while one is
 plainly being sent.
 
-## File extraction: a deliberate fallback
+## File extraction
 
-On a typical course the substance lives in the files, not the descriptions. An
-assistant that reads only wiki pages demos well and disappoints in use — so the
-bridge ships a **default PDF extractor** (`bridge/extract.py`), used by the
-Stud.IP and Moodle adapters to index attachments **one document per page**.
-
-**It is a floor, not a destination.** ByCS's `local_ai_content` and OSKI.nrw's
-LMS-RAG are both aimed at this ground; OSKI cites
-filename and page number. Where either is deployed, point the retrieval provider
-at it and this extractor should not run. It exists because:
-
-- **Neither has shipped retrieval.** Reading `local_ai_content`'s source on
-  2026-08-27 (`v0.1.1`, 8 commits) found **no vector store, no embedding
-  purpose and no indexer** — what it ships is a text-extraction *service* for
-  other plugins to consume; the RAG parts exist in its DevCamp presentation,
-  not yet in the code. OSKI's backend is unpublished. A contract whose grounded
-  path works only once someone else releases is a contract nobody can try
-  today.
-- **Both target Moodle only.** ILIAS and Stud.IP have no engine to defer to.
-
-Scope is deliberately small: **PDF only, text only, no OCR.** A scanned PDF
-raises rather than silently returning nothing, and one unreadable file never
-fails an indexing run.
-
-**PDF text comes from Poppler's `pdftotext` when it is installed, and from a
-stdlib reader when it is not** — the same rule as `RETRIEVAL_PROVIDER=auto`:
-use what the institution already has, ship a fallback anyway, and say which one
-ran. The fallback keeps the promise that the demo runs with nothing installed,
-but it is genuinely worse: measured against three arbitrary real PDFs on
-2026-08-27 it returned **12%** of one report's text and 93% of another's, where
-`pdftotext` returned all of both. A partial extraction reads as a success and
-loses pages silently, so an indexing run says when the fallback produced its
-text. `PDF_EXTRACTOR=builtin` forces the fallback; `poppler` requires Poppler
-and fails loudly if it is absent. Poppler is also a dependency of ByCS
-`local_ai_content`, so an institution running that stack already has it.
-
-This is what finally populates `Source.locator`. The field has been in the
-contract since the design, but until now nothing filled it: a citation of
+On a typical course the substance lives in the files, not the descriptions — so
+the adapters download attachments and index their contents, **one document per
+page or slide**. That is what fills `Source.locator`: a citation of
 `Vorlesung 3.pdf` cannot be checked, `Vorlesung 3.pdf, S. 12` can.
 
-**Stud.IP file downloads work over the JSON-API** (verified against
-studip.uni-osnabrueck.de, 2026-08-24): `GET /file-refs/{id}/content` with the
-same HTTP Basic credentials as the rest of the API.
+| Format | Unit |
+|---|---|
+| PDF | per page |
+| `.pptx`, `.odp` | per slide, including speaker notes |
+| `.xlsx`, `.ods` | per sheet |
+| `.docx`, `.odt` | whole document |
+| Stud.IP Courseware | per chapter |
 
-**Send no `Accept` header on that route.** With `Accept: */*` it returns HTTP
-500; with no `Accept` header it returns 200 and `application/pdf`. Stud.IP
-negotiates content there and does not treat `*/*` as "anything" — so do not add
-one to be tidy. The route also answers HEAD with an `ETag` of
-`"<id> <mtime> <size>"`, which is what an incremental indexer should use to skip
-unchanged files.
+**Install `poppler-utils`.** PDF text comes from `pdftotext` when it is
+installed and from a much weaker built-in reader when it is not — on real
+documents the difference has been the whole file versus 12% of it. The built-in
+reader exists so the demo runs with nothing installed, not because it is good
+enough. An indexing run prints which one it used.
 
-Note `meta.download-url` points at `sendfile.php` in the **web front end**,
-which is a different application and needs a session — it answers Basic auth
-with HTTP 200 carrying the login page. That is not the API's download route.
-The adapter keeps a guard against receiving HTML, because a wrong base URL or a
-redirect still lands there and "200 with 23 KB of HTML" would otherwise be
-reported as a corrupt PDF.
+Scanned PDFs are refused rather than indexed as empty, so a course cannot
+silently lose a file; reading them would need OCR, which this does not do.
+Legacy `.doc`/`.ppt`/`.xls` are refused too. One unreadable file never fails an
+indexing run.
 
-**Courseware is often the whole course.** A survey of six real Stud.IP courses
-found four with Courseware and **three of those with no files at all** — the
-Mikromodule are Courseware end to end, so the file extractors retrieve nothing
-there. It is walked properly (`descendants` returns the tree in one call), one
-document per chapter, with the chapter title as the locator.
-
-Two things it deliberately does not index. **Quiz content**: a `test` block
-carries only an assignment reference, and putting a course's answers where a
-student can ask an assistant for them is a governance decision — the block's
-title is recorded so the assistant knows a self-test exists, nothing more.
-**Images**: embedded as `sendfile.php` URLs needing a web session the JSON-API
-credentials do not provide.
-
-**Formats.** PDF (per page), plus `.pptx`, `.docx`, `.xlsx` and their
-OpenDocument equivalents `.odp`, `.odt`, `.ods` — all ZIPs of XML, so `zipfile`
-and the stdlib XML parser do the work and the no-dependency promise holds.
-Presentations extract one unit per slide **including speaker notes**, which
-often carry what the slide elides; spreadsheets one per sheet. Word and ODF text
-get no locator, because those formats have no page boundaries until they render
-and inventing one would be a citation that cannot be checked.
-
-Legacy binary `.doc`/`.ppt`/`.xls` are OLE compound files rather than ZIPs — a
-different and much larger problem, refused with a message saying so.
-
-**Still not extracted:** slides in other formats (`.pptx`, `.docx`), and the
-Moodle adapter's files. Adding formats is the wrong instinct here — the right
-next step is asking ByCS and OSKI whether their engines expose an HTTP retrieval
-API this can defer to instead.
+> Details — measurements, per-platform download quirks, what Courseware
+> deliberately does not index — are in **[EXTRACTION.md](EXTRACTION.md)**.
 
 ## An unexpected finding: Stud.IP is the easier platform
 
@@ -301,6 +242,7 @@ reimplement it — a governance primitive neither Moodle nor ILIAS has.
 
 ```
 DESIGN.md                     why it is shaped this way
+EXTRACTION.md                 formats, locators, per-platform download quirks
 bridge/
   contract.py                 the deliverable: types + provider interfaces
   server.py                   HTTP service (stdlib only)

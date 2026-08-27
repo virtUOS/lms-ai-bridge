@@ -160,3 +160,26 @@ field, so adapters need no special-casing.
 - **Not a settlement of the data-protection questions.** Indexing creates a copy
   of course material, which is a real retention question, and only material a
   lecturer has released for AI should ever be extracted.
+
+## Why the bridge extracts text at all
+
+Extraction looks like duplicated effort: two funded German teams are building
+course-grounded RAG for Moodle, both with their own extraction. Where either is
+deployed, point the retrieval provider at it and the bridge's extractor should
+not run. It exists for two reasons.
+
+**Neither has shipped retrieval.** Reading `local_ai_content`'s source
+(2026-08-27, `v0.1.1`, 8 commits) found no vector store, no embedding purpose
+and no indexer — what it ships is a text-extraction *service* for other plugins
+to consume. The RAG parts are in its DevCamp presentation, not the code.
+OSKI.nrw's backend is unpublished. A contract whose grounded path only works
+once someone else releases is a contract nobody can try today.
+
+**Both target Moodle only.** ILIAS and Stud.IP have no core AI layer and no
+engine aimed at them, so on those platforms there is nothing to defer to — and
+Stud.IP is, per live probing, the *easier* platform to extract from.
+
+The consequence for scope: extraction is a floor that keeps the contract
+demonstrable everywhere, not an attempt to build a better extractor than the
+teams whose full-time job it is. When one of those engines exposes an HTTP
+retrieval API, deferring to it is the better move than adding formats here.
