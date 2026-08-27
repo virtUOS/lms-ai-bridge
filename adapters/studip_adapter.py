@@ -27,7 +27,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bridge.extract import PdfExtractionError, extract_pdf_pages  # noqa: E402
+from bridge.extract import (  # noqa: E402
+    PdfExtractionError,
+    extract_pdf_pages_with_engine,
+)
 from bridge.extract_office import (  # noqa: E402
     OfficeExtractionError, extract_office_units, office_kind,
 )
@@ -216,8 +219,15 @@ def fetch_course_files(course_id: str, limit: int = 25) -> list[dict]:
         # format has no honest subdivision (Word has no pages until it renders).
         try:
             if blob.startswith(b"%PDF"):
-                units = [(f"S. {i}", t)
-                         for i, t in enumerate(extract_pdf_pages(blob), 1)]
+                pages, engine = extract_pdf_pages_with_engine(blob)
+                if engine == "builtin":
+                    # Worth saying out loud: the fallback returned 12% of one
+                    # real report's text where Poppler returned all of it
+                    # (2026-08-27). A thin index is easier to explain later if
+                    # the run said which extractor produced it.
+                    print(f"  {name}: stdlib PDF reader (install poppler-utils "
+                          f"for complete extraction)", file=sys.stderr)
+                units = [(f"S. {i}", t) for i, t in enumerate(pages, 1)]
             elif office_kind(blob):
                 units = extract_office_units(blob)
             else:

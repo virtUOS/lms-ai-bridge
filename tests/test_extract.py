@@ -11,7 +11,9 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
+import os
 import zlib
 from io import BytesIO
 from pathlib import Path
@@ -19,7 +21,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bridge.contract import IndexRequest, Message, Source  # noqa: E402
-from bridge.extract import PdfExtractionError, extract_pdf_pages  # noqa: E402
+from bridge.extract import (  # noqa: E402
+    PdfExtractionError,
+    _poppler_path,
+    extract_pdf_pages,
+    extract_pdf_pages_with_engine,
+)
 from bridge.extract_office import (  # noqa: E402
     OfficeExtractionError, extract_office_units, office_kind,
 )
@@ -45,6 +52,98 @@ def make_pdf(pages: list[str], encoding: str = "/WinAnsiEncoding",
     return bytes(out)
 
 
+def make_pdf_cr_delimited(pages: list[str]) -> bytes:
+    """A PDF that ends its lines with a bare CR, as PDF 1.7 §7.2.3 permits.
+
+    Real files do this: the EUA report (checked 2026-08-27) writes
+    `endstream\rendobj\r`, and every one of its 107 streams was invisible to a
+    reader that assumed LF. Regression fixture for that file.
+    """
+    out = bytearray(b"%PDF-1.4\r")
+    for i, text in enumerate(pages, start=1):
+        body = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode("cp1252", "replace")
+        stream = zlib.compress(body)
+        out += (
+            f"{i} 0 obj\r<< /Filter /FlateDecode /Length {len(stream)} "
+            f"/FontEncoding /WinAnsiEncoding >>\rstream\r\n".encode("ascii")
+        )
+        out += stream + b"\rendstream\rendobj\r"
+    out += b"trailer\r<< /Root 1 0 R >>\r%%EOF\r"
+    return bytes(out)
+
+
+class TestPdfExtractorSelection(unittest.TestCase):
+    """Poppler when the institution has it, stdlib when it does not.
+
+    The same rule as `RETRIEVAL_PROVIDER=auto`: use what is already installed,
+    ship a fallback anyway, and say which one ran. Poppler reads PDFs this
+    module's fallback cannot — the EUA report measured 12% against pdftotext's
+    100% (2026-08-27) — but requiring it would break the promise that the demo
+    runs with nothing installed.
+    """
+
+    def test_reports_which_extractor_ran(self):
+        pages, engine = extract_pdf_pages_with_engine(make_pdf(["Seite"]))
+        self.assertIn(engine, ("poppler", "builtin"))
+        self.assertTrue(any("Seite" in p for p in pages))
+
+    def test_env_can_force_the_builtin_extractor(self):
+        with mock.patch.dict(os.environ, {"PDF_EXTRACTOR": "builtin"}):
+            _, engine = extract_pdf_pages_with_engine(make_pdf(["Seite"]))
+        self.assertEqual(engine, "builtin")
+
+    def test_falls_back_when_poppler_is_absent(self):
+        with mock.patch.dict(os.environ, {"PDF_EXTRACTOR": "auto"}), \
+             mock.patch("bridge.extract._poppler_path", return_value=None):
+            pages, engine = extract_pdf_pages_with_engine(make_pdf(["Seite"]))
+        self.assertEqual(engine, "builtin")
+        self.assertTrue(any("Seite" in p for p in pages))
+
+    def test_explicit_poppler_request_does_not_silently_downgrade(self):
+        """Asked for explicitly but unusable: raise, do not quietly do worse.
+
+        Mirrors the RETRIEVAL_PROVIDER=embeddings case, which warns rather than
+        letting an operator believe they have retrieval they do not have. Here
+        the difference is whole pages of text, so it raises.
+        """
+        with mock.patch.dict(os.environ, {"PDF_EXTRACTOR": "poppler"}), \
+             mock.patch("bridge.extract._poppler_path", return_value=None):
+            with self.assertRaises(PdfExtractionError) as ctx:
+                extract_pdf_pages_with_engine(make_pdf(["Seite"]))
+        self.assertIn("pdftotext", str(ctx.exception))
+
+    def test_page_count_and_order_survive_either_engine(self):
+        """A locator is only checkable if page N is page N in both engines."""
+        pdf = make_pdf(["Alpha", "Beta", "Gamma"])
+        builtin, _ = extract_pdf_pages_with_engine(pdf, engine="builtin")
+        self.assertEqual(len(builtin), 3)
+        self.assertIn("Alpha", builtin[0])
+        self.assertIn("Gamma", builtin[2])
+        # Not asserted against Poppler here: `make_pdf` writes content streams
+        # without a page tree or xref, which this module's reader accepts and a
+        # conforming parser rightly rejects. Poppler's page numbering is covered
+        # by the real-PDF fixtures instead.
+
+    def test_scanned_pdf_still_refuses_under_poppler(self):
+        """Poppler returning nothing means scanned — still a refusal, not "".
+
+        A scanned PDF that returns empty strings would be indexed as a document
+        with no text, which is how a course silently loses a file.
+        """
+        if not _poppler_path():
+            self.skipTest("poppler not installed")
+        # Poppler reads a scan without complaint and returns blank pages, so
+        # this is asserted on its *output*, not on a rejected file: an earlier
+        # version of this test used a PDF poppler refused outright, which
+        # passed while the real case — ocr_test.pdf, one empty page returned as
+        # a valid document — went through silently.
+        with mock.patch("bridge.extract.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout=b"\n\f\n\f", stderr=b"")
+            with self.assertRaises(PdfExtractionError) as ctx:
+                extract_pdf_pages_with_engine(make_pdf(["x"]), engine="poppler")
+        self.assertIn("OCR", str(ctx.exception))
+
+
 class TestPdfExtraction(unittest.TestCase):
     def test_extracts_text_from_a_real_pdf(self):
         pages = extract_pdf_pages(make_pdf(["Monaden sind Monoide."]))
@@ -60,6 +159,19 @@ class TestPdfExtraction(unittest.TestCase):
     def test_reads_uncompressed_streams(self):
         pages = extract_pdf_pages(make_pdf(["Unkomprimiert"], compress=False))
         self.assertIn("Unkomprimiert", pages[0])
+
+    def test_cr_delimited_pdf_is_not_mistaken_for_scanned(self):
+        """A CR-delimited PDF must not be reported as scanned or encrypted.
+
+        The failure this guards against is a wrong diagnosis, not a crash. The
+        EUA report — 78k characters of text, 83 font objects, plainly not a
+        scan — was refused with the scanned-or-encrypted message because every
+        stream ended `\\rendstream` and the reader required `\\n`. Telling a
+        reader their text document is a scan sends them to fix the wrong thing.
+        """
+        pages = extract_pdf_pages(make_pdf_cr_delimited(["Erste Seite", "Zweite Seite"]))
+        self.assertTrue(any("Erste Seite" in p for p in pages), pages)
+        self.assertTrue(any("Zweite Seite" in p for p in pages), pages)
 
     def test_rejects_non_pdf_rather_than_returning_junk(self):
         # An adapter must be able to tell "not a PDF" from "an empty PDF".

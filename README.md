@@ -66,6 +66,15 @@ offer only what a deployment can actually do.
 
 Python 3.11+, **standard library only** — nothing to install.
 
+Poppler (`pdftotext`) is optional and strongly recommended: PDF text extraction
+uses it when present and falls back to a markedly weaker built-in reader when
+not. See [File extraction: a deliberate fallback](#file-extraction-a-deliberate-fallback)
+for what the difference costs.
+
+    apt install poppler-utils      # Debian/Ubuntu
+    dnf install poppler-utils      # RHEL/Fedora
+    brew install poppler           # macOS
+
 ## What works
 
 Verified against a production Stud.IP instance:
@@ -195,8 +204,19 @@ at it and this extractor should not run. It exists because:
 
 Scope is deliberately small: **PDF only, text only, no OCR.** A scanned PDF
 raises rather than silently returning nothing, and one unreadable file never
-fails an indexing run. Standard library only — no `pypdf` — so the demo still
-runs with nothing installed.
+fails an indexing run.
+
+**PDF text comes from Poppler's `pdftotext` when it is installed, and from a
+stdlib reader when it is not** — the same rule as `RETRIEVAL_PROVIDER=auto`:
+use what the institution already has, ship a fallback anyway, and say which one
+ran. The fallback keeps the promise that the demo runs with nothing installed,
+but it is genuinely worse: measured against three arbitrary real PDFs on
+2026-08-27 it returned **12%** of one report's text and 93% of another's, where
+`pdftotext` returned all of both. A partial extraction reads as a success and
+loses pages silently, so an indexing run says when the fallback produced its
+text. `PDF_EXTRACTOR=builtin` forces the fallback; `poppler` requires Poppler
+and fails loudly if it is absent. Poppler is also a dependency of ByCS
+`local_ai_content`, so an institution running that stack already has it.
 
 This is what finally populates `Source.locator`. The field has been in the
 contract since the design, but until now nothing filled it: a citation of

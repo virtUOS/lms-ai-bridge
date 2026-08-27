@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from html import unescape
@@ -93,6 +95,31 @@ def fetch_course_documents(course_id: int) -> tuple[str, list[dict]]:
     """
     sections = moodle_call("core_course_get_contents", courseid=course_id)
     docs: list[dict] = []
+
+    # The course description, which `core_course_get_contents` does not return.
+    # Worth a separate call: it is the one text field a lecturer reliably fills
+    # in, it usually says what the course is *about* — the thing a student asks
+    # first — and without it a course whose material is all attachments has no
+    # document describing itself. Failure here is not fatal: a least-privilege
+    # token may not carry `core_course_get_courses`, and losing the description
+    # is better than losing the course.
+    try:
+        for course in moodle_call("core_course_get_courses") or []:
+            if course.get("id") != course_id:
+                continue
+            summary = strip_html(course.get("summary", ""))
+            if summary:
+                docs.append(
+                    {
+                        "activity_ref": f"moodle:{course_id}:course",
+                        "title": strip_html(course.get("fullname", ""))
+                        or "Kursbeschreibung",
+                        "text": summary,
+                    }
+                )
+            break
+    except (RuntimeError, urllib.error.URLError) as exc:
+        print(f"  no course description: {exc}", file=sys.stderr)
 
     for section in sections:
         sec_name = strip_html(section.get("name", ""))

@@ -30,14 +30,33 @@ Standard library only, like the rest of the prototype — a colleague must be ab
 to run the demo without installing anything. That rules out `pypdf`, so what
 follows is a small PDF content-stream reader: enough for the text-bearing PDFs a
 course actually contains, and honest about what it cannot do.
+
+**Poppler is used when it is installed.** Measured against three arbitrary
+real PDFs on 2026-08-27, the reader below returned 12% of the text of one and
+93% of another, where `pdftotext` returned all of both. That gap is not a
+tuning problem: a partial extraction reads as a success and loses pages
+silently, which is the same failure shape as retrieval over noise. So the rule
+from `RETRIEVAL_PROVIDER=auto` applies here too — **use what the institution
+already has, ship a fallback anyway, and say which one ran.** `pdftotext` is a
+dependency of ByCS's `local_ai_content` as well, so an institution running that
+stack already has it. Set `PDF_EXTRACTOR=builtin` to force the fallback, or
+`poppler` to require Poppler and fail loudly if it is missing.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import zlib
 
-__all__ = ["extract_pdf_pages", "PdfExtractionError"]
+__all__ = [
+    "extract_pdf_pages",
+    "extract_pdf_pages_with_engine",
+    "PdfExtractionError",
+]
 
 
 class PdfExtractionError(Exception):
@@ -59,7 +78,11 @@ class PdfExtractionError(Exception):
 # that lecture material overwhelmingly consists of.
 
 _OBJ = re.compile(rb"(\d+)\s+(\d+)\s+obj\b(.*?)\bendobj", re.DOTALL)
-_STREAM = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.DOTALL)
+# PDF 1.7 §7.2.3: a line may end CR, LF or CRLF, and `stream` is followed by
+# CRLF or LF (never CR alone) — but the EOL *before* `endstream` may be any
+# of the three, or absent. Requiring LF there hid every stream in a
+# CR-delimited file: 107 of 107 in the EUA report (checked 2026-08-27).
+_STREAM = re.compile(rb"stream\r?\n(.*?)[\r\n]{0,2}endstream", re.DOTALL)
 
 
 def _inflate(raw: bytes, header: bytes) -> bytes | None:
@@ -208,8 +231,119 @@ def _text_from_stream(data: bytes, encoding: str = "") -> str:
     return text.strip()
 
 
+# Poppler ships `pdftotext` on every platform this is likely to run on, and it
+# is already a dependency of ByCS `local_ai_content` (their README asks for
+# poppler-utils). Resolved through PATH so an operator can point at their own
+# build; looked up per call rather than cached so a test can patch it.
+def _poppler_path() -> str | None:
+    """Return the path to `pdftotext`, or None when Poppler is not installed."""
+    return shutil.which(os.environ.get("PDFTOTEXT_BIN", "pdftotext"))
+
+
+def _extract_pdf_pages_poppler(data: bytes, binary: str) -> list[str]:
+    """Extract per page with Poppler, preserving page numbering.
+
+    `-layout` is deliberately not passed: it reproduces columns visually, which
+    reads worse once chunked. Page boundaries come from the form feed pdftotext
+    writes between pages (PDF 1.7 §14.8 has no notion of one, so this is
+    pdftotext's own convention and the reason the split is on \f).
+    """
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
+        handle.write(data)
+        handle.flush()
+        try:
+            done = subprocess.run(
+                [binary, "-enc", "UTF-8", "-q", handle.name, "-"],
+                capture_output=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise PdfExtractionError(
+                "pdftotext timed out after 120s — the PDF may be malformed"
+            ) from exc
+        except OSError as exc:  # pragma: no cover - depends on the host
+            raise PdfExtractionError(f"could not run {binary}: {exc}") from exc
+
+    if done.returncode != 0:
+        detail = done.stderr.decode("utf-8", "replace").strip() or "no detail"
+        raise PdfExtractionError(f"pdftotext failed: {detail}")
+
+    text = done.stdout.decode("utf-8", "replace")
+    # Trailing form feed produces a phantom final page; drop it, but keep every
+    # interior empty page so that page N stays at index N-1 and a locator of
+    # "S. 12" still points at page 12.
+    pages = text.split("\f")
+    if pages and not pages[-1].strip():
+        pages.pop()
+    pages = [page.strip() for page in pages]
+
+    # Poppler reads a scanned PDF happily and returns empty pages. Returning
+    # those would index the file as a document with no text, which is how a
+    # course quietly loses a scan: nothing errors, nothing is searchable, and
+    # the gap only shows when someone asks about the missing material. The
+    # fallback refuses this case explicitly, and so must this path.
+    if not any(pages):
+        raise PdfExtractionError(
+            "no extractable text — the PDF is scanned or image-only and needs "
+            "OCR, which this module does not do"
+        )
+    return pages
+
+
+def extract_pdf_pages_with_engine(
+    data: bytes, engine: str = ""
+) -> tuple[list[str], str]:
+    """Extract per page, returning the pages and which engine produced them.
+
+    The engine is part of the return value rather than a log line because the
+    difference is visible in the output: a course indexed by the fallback may
+    be missing pages that Poppler would have read. A caller that records which
+    ran can explain a thin index later; one that does not, cannot.
+    """
+    if not data.startswith(b"%PDF"):
+        raise PdfExtractionError("not a PDF (missing %PDF header)")
+
+    mode = (engine or os.environ.get("PDF_EXTRACTOR", "auto")).strip().lower()
+
+    if mode == "builtin":
+        return _extract_pdf_pages_builtin(data), "builtin"
+
+    binary = _poppler_path()
+    if mode == "poppler":
+        if not binary:
+            # Asked for explicitly and unusable. Unlike the retrieval fallback,
+            # which warns and carries on, this raises: the cost of guessing
+            # wrong is whole pages missing from a citation.
+            raise PdfExtractionError(
+                "PDF_EXTRACTOR=poppler but pdftotext was not found on PATH — "
+                "install poppler-utils or set PDF_EXTRACTOR=builtin"
+            )
+        return _extract_pdf_pages_poppler(data, binary), "poppler"
+
+    if binary:
+        try:
+            return _extract_pdf_pages_poppler(data, binary), "poppler"
+        except PdfExtractionError:
+            # A PDF Poppler cannot read is unlikely to be one the fallback can,
+            # but trying costs a moment and the fallback has its own strengths
+            # on damaged files. If both fail the fallback's error is raised,
+            # which is the more specific of the two.
+            pass
+    return _extract_pdf_pages_builtin(data), "builtin"
+
+
 def extract_pdf_pages(data: bytes) -> list[str]:
     """Extract text from a PDF, one string per page.
+
+    Returns a list whose index + 1 is the page number, so a caller can build
+    `Source.locator` as "S. {i+1}". Kept as the module's simple entry point;
+    use `extract_pdf_pages_with_engine` when the caller needs to record which
+    extractor ran.
+    """
+    return extract_pdf_pages_with_engine(data)[0]
+
+def _extract_pdf_pages_builtin(data: bytes) -> list[str]:
+    """Extract text from a PDF with the stdlib reader, one string per page.
 
     Returns a list whose index + 1 is the page number, so a caller can build
     `Source.locator` as "S. {i+1}". Pages with no extractable text are kept as
