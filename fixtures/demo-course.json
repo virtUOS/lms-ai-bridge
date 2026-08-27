@@ -1,0 +1,20 @@
+{
+  "course_ref": "demo:fp-vorlesung",
+  "documents": [
+    {
+      "activity_ref": "demo:fp-vorlesung:section:1",
+      "title": "Vorlesung 3 — Monaden",
+      "text": "Ein Monad ist eine algebraische Struktur, die in der funktionalen Programmierung verwendet wird, um Berechnungen mit Kontext zu verketten.\n\nDie beiden zentralen Operationen sind return (auch unit genannt), das einen Wert in den monadischen Kontext hebt, und bind (geschrieben >>=), das eine Berechnung mit einer Folgeberechnung verkettet.\n\nDamit eine Struktur ein Monad ist, müssen die drei Monadengesetze gelten: linke Identität, rechte Identität und Assoziativität."
+    },
+    {
+      "activity_ref": "demo:fp-vorlesung:section:2",
+      "title": "Vorlesung 4 — Fehlerbehandlung mit Maybe",
+      "text": "Der Maybe-Typ modelliert Berechnungen, die fehlschlagen können, ohne Ausnahmen zu verwenden. Ein Wert ist entweder Just x oder Nothing.\n\nMaybe ist ein Monad: bind propagiert Nothing automatisch durch eine Kette von Berechnungen, sodass keine expliziten Fallunterscheidungen nötig sind.\n\nIn der Praxis ersetzt Maybe die Null-Referenz und macht das Fehlschlagen im Typsystem sichtbar."
+    },
+    {
+      "activity_ref": "demo:fp-vorlesung:section:3",
+      "title": "Übungsblatt 2 — Organisatorisches",
+      "text": "Die Abgabe des zweiten Übungsblatts erfolgt bis zum 15. Januar über Stud.IP. Gruppenarbeit ist bis zu drei Personen erlaubt.\n\nDie Sprechstunde findet dienstags von 14 bis 16 Uhr in Raum 32/107 statt."
+    }
+  ]
+}
