@@ -68,6 +68,16 @@ class PdfExtractionError(Exception):
     """
 
 
+class _NoTextFound(PdfExtractionError):
+    """Poppler read the file and found no text — that is, it is a scan.
+
+    A subclass so every existing caller still catches it. It exists so the
+    auto path can tell "read it, there is no text" (say OCR) apart from "could
+    not parse it at all" (the fallback's message is more informative there).
+    """
+
+
+
 # --------------------------------------------------------------------------
 # Object plumbing
 # --------------------------------------------------------------------------
@@ -283,7 +293,7 @@ def _extract_pdf_pages_poppler(data: bytes, binary: str) -> list[str]:
     # the gap only shows when someone asks about the missing material. The
     # fallback refuses this case explicitly, and so must this path.
     if not any(pages):
-        raise PdfExtractionError(
+        raise _NoTextFound(
             "no extractable text — the PDF is scanned or image-only and needs "
             "OCR, which this module does not do"
         )
@@ -323,12 +333,21 @@ def extract_pdf_pages_with_engine(
     if binary:
         try:
             return _extract_pdf_pages_poppler(data, binary), "poppler"
-        except PdfExtractionError:
+        except PdfExtractionError as poppler_error:
             # A PDF Poppler cannot read is unlikely to be one the fallback can,
             # but trying costs a moment and the fallback has its own strengths
-            # on damaged files. If both fail the fallback's error is raised,
-            # which is the more specific of the two.
-            pass
+            # on damaged files.
+            try:
+                return _extract_pdf_pages_builtin(data), "builtin"
+            except PdfExtractionError:
+                # When Poppler read the file and found no text, its message is
+                # the accurate one — it names OCR, where the fallback would
+                # advise installing the Poppler this reader plainly has. When
+                # Poppler could not parse the file at all, the fallback knows
+                # more about why and its message is kept.
+                if isinstance(poppler_error, _NoTextFound):
+                    raise poppler_error from None
+                raise
     return _extract_pdf_pages_builtin(data), "builtin"
 
 

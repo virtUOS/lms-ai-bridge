@@ -24,7 +24,20 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from html import unescape
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from bridge.extract import (  # noqa: E402
+    PdfExtractionError,
+    extract_pdf_pages_with_engine,
+)
+from bridge.extract_office import (  # noqa: E402
+    OfficeExtractionError,
+    extract_office_units,
+    office_kind,
+)
 
 BRIDGE_URL = os.environ.get("BRIDGE_URL", "http://127.0.0.1:8080")
 BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "")
@@ -68,6 +81,109 @@ def moodle_call(function: str, **params) -> dict | list:
             f"{out.get('message')}"
         )
     return out
+
+
+# Moodle's own download route. Two things about it are easy to get wrong and
+# both cost a working afternoon (verified against a live instance 2026-08-27).
+_EXTRACTABLE = re.compile(
+    r"\.(pdf|docx?|odt|pptx?|odp|xlsx?|ods|txt|md)$", re.IGNORECASE
+)
+
+
+def with_token(fileurl: str) -> str:
+    """Append the web-service token to a `pluginfile.php` URL.
+
+    **`&`, not `?`.** `fileurl` from `core_course_get_contents` already ends in
+    `?forcedownload=1`, so `?token=…` builds a second query string and Moodle
+    answers **HTTP 200 with a JSON error body** — "A required parameter (token)
+    was missing" — while a token is plainly being sent. A 200 carrying an error
+    is the same trap as Stud.IP's `Accept` header: the status code cannot be
+    trusted to mean what it says.
+    """
+    separator = "&" if "?" in fileurl else "?"
+    # Read at call time rather than from the module constant: the constant is
+    # bound at import, which makes this untestable and means a token supplied
+    # after import is ignored.
+    token = os.environ.get("MOODLE_TOKEN", MOODLE_TOKEN)
+    return f"{fileurl}{separator}token={token}"
+
+
+def moodle_download(fileurl: str) -> bytes:
+    """Fetch a course file's bytes.
+
+    Guards against receiving JSON: the route answers 200 with an error body for
+    several failures, so "did I get a document" has to be checked rather than
+    assumed from the status.
+    """
+    with urllib.request.urlopen(with_token(fileurl), timeout=120) as response:
+        blob = response.read()
+        kind = response.headers.get("Content-Type", "")
+    if kind.startswith("application/json") or blob[:1] in (b"{", b"["):
+        raise RuntimeError(f"expected a file, got {kind or 'JSON'}")
+    return blob
+
+
+def _file_documents(course_id: int, mod: dict) -> list[dict]:
+    """Download a module's files and return one document per page or slide.
+
+    Mirrors the Stud.IP adapter: locators are "S. 12" for a PDF page and
+    "Folie 4" for a slide, so a citation can be checked. One unreadable file
+    costs its own document and never the course — a scanned PDF among twenty
+    good ones should not empty the index.
+    """
+    docs: list[dict] = []
+    for content in mod.get("contents", []) or []:
+        if content.get("type") != "file":
+            continue
+        name = content.get("filename", "")
+        fileurl = content.get("fileurl")
+        if not fileurl or not _EXTRACTABLE.search(name):
+            if fileurl:
+                print(f"  skipped {name}: no extractor for this format",
+                      file=sys.stderr)
+            continue
+
+        try:
+            blob = moodle_download(fileurl)
+        except (urllib.error.URLError, RuntimeError, OSError) as exc:
+            print(f"  skipped {name}: {exc}", file=sys.stderr)
+            continue
+
+        try:
+            if blob.startswith(b"%PDF"):
+                pages, engine = extract_pdf_pages_with_engine(blob)
+                if engine == "builtin":
+                    print(f"  {name}: stdlib PDF reader (install poppler-utils "
+                          f"for complete extraction)", file=sys.stderr)
+                units = [(f"S. {i}", text) for i, text in enumerate(pages, 1)]
+            elif office_kind(blob):
+                units = extract_office_units(blob)
+            else:
+                print(f"  skipped {name}: no extractor for this format",
+                      file=sys.stderr)
+                continue
+        except (PdfExtractionError, OfficeExtractionError) as exc:
+            print(f"  skipped {name}: {exc}", file=sys.stderr)
+            continue
+
+        kept = 0
+        for locator, text in units:
+            body = re.sub(r"\s+", " ", text).strip()
+            # Same floor as the Stud.IP adapter: enough to drop dividers and
+            # bare cover pages, low enough to keep a sparse but real slide.
+            if len(body) < 15:
+                continue
+            docs.append(
+                {
+                    "activity_ref": f"moodle:{course_id}:file:{mod.get('id')}:{name}",
+                    "title": name,
+                    "locator": locator,
+                    "text": body,
+                }
+            )
+            kept += 1
+        print(f"  {name}: {kept}/{len(units)} units with text", file=sys.stderr)
+    return docs
 
 
 def fetch_course_documents(course_id: int) -> tuple[str, list[dict]]:
@@ -133,20 +249,19 @@ def fetch_course_documents(course_id: int) -> tuple[str, list[dict]]:
                 }
             )
         for mod in section.get("modules", []):
-            parts = [strip_html(mod.get("description", ""))]
-            for content in mod.get("contents", []) or []:
-                if content.get("type") == "file":
-                    parts.append(f"[Datei: {content.get('filename', '')}]")
-            text = " ".join(p for p in parts if p).strip()
-            if not text:
-                continue
-            docs.append(
-                {
-                    "activity_ref": f"moodle:{course_id}:module:{mod.get('id')}",
-                    "title": strip_html(mod.get("name", "")) or "Aktivität",
-                    "text": text,
-                }
-            )
+            description = strip_html(mod.get("description", ""))
+            if description:
+                docs.append(
+                    {
+                        "activity_ref": f"moodle:{course_id}:module:{mod.get('id')}",
+                        "title": strip_html(mod.get("name", "")) or "Aktivität",
+                        "text": description,
+                    }
+                )
+            # The files themselves, not their names. Until 2026-08-27 this
+            # recorded "[Datei: skript.pdf]" and stopped, so a course whose
+            # substance sits in attachments indexed as a list of filenames.
+            docs.extend(_file_documents(course_id, mod))
 
     return f"moodle:{course_id}", docs
 

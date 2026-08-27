@@ -124,6 +124,23 @@ class TestPdfExtractorSelection(unittest.TestCase):
         # conforming parser rightly rejects. Poppler's page numbering is covered
         # by the real-PDF fixtures instead.
 
+    def test_a_scan_is_not_told_to_install_the_poppler_it_has(self):
+        """With Poppler present, a scan gets Poppler's message, not the fallback's.
+
+        The auto path tries Poppler, then the fallback. Raising the fallback's
+        error unconditionally told someone who plainly has Poppler installed to
+        install poppler-utils, and called a scan a compression-filter problem.
+        """
+        if not _poppler_path():
+            self.skipTest("poppler not installed")
+        with mock.patch("bridge.extract.subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout=b"\n\f\n", stderr=b"")
+            with self.assertRaises(PdfExtractionError) as ctx:
+                extract_pdf_pages_with_engine(make_pdf([]), engine="auto")
+        message = str(ctx.exception)
+        self.assertIn("OCR", message)
+        self.assertNotIn("poppler-utils", message)
+
     def test_scanned_pdf_still_refuses_under_poppler(self):
         """Poppler returning nothing means scanned — still a refusal, not "".
 
