@@ -68,8 +68,7 @@ Python 3.11+, **standard library only** — nothing to install.
 
 Poppler (`pdftotext`) is optional and strongly recommended: PDF text extraction
 uses it when present and falls back to a markedly weaker built-in reader when
-not. See [File extraction: a deliberate fallback](#file-extraction-a-deliberate-fallback)
-for what the difference costs.
+not. [EXTRACTION.md](EXTRACTION.md) has the measurements.
 
     apt install poppler-utils      # Debian/Ubuntu
     dnf install poppler-utils      # RHEL/Fedora
