@@ -88,9 +88,10 @@ Verified against a production Stud.IP instance:
   as locators, speaker labels where the ASR server provides them
 - **Governance metadata** — licence and download permission per file
 
-Adapters: **Stud.IP** works against production; **Moodle** connects but has not
-been tested against a course with content; **ILIAS** is written but has never
-run, for want of an instance.
+Adapters: **Stud.IP** works against production; **Moodle** works against a
+course with content — the course description plus per-file text, though it does
+not yet download files the way the Stud.IP adapter does; **ILIAS** is written
+but has never run, for want of an instance.
 
 ## What does not work yet
 
@@ -177,13 +178,21 @@ Verified against live instances on 2026-08-24:
 |---|---|
 | Bridge, end to end | **works** — index, grounded retrieval with citations, forget |
 | Stud.IP adapter | **works** against `studip-test.uni-osnabrueck.de` (JSON-API, HTTP Basic, no admin rights needed) |
-| Moodle adapter | **connects and runs** against `moodle-test-virtuos-openstack.uni-osnabrueck.de` (Moodle 5.1.3+, user-scoped token) — but see below |
+| Moodle adapter | **works** against `moodle-test-virtuos-openstack.uni-osnabrueck.de` (Moodle 5.1.3+): course description and module text — but see below |
 | ILIAS adapter | **not written.** No instance was available |
 
-**The Moodle adapter returned zero documents from all three test courses.** Not a
-bug: `core_course_get_contents` exposes section summaries and module
-descriptions, and those courses have neither. The same call on a course with
-content would work.
+**Verified against a course with content, 2026-08-27.** The first three test
+courses returned *zero* documents — not a bug: `core_course_get_contents`
+exposes section summaries and module descriptions, and those courses had
+neither. On a seeded course it returns the course description and one document
+per module.
+
+Two limits worth knowing. `core_course_get_contents` does **not** return the
+course-level summary, so the adapter fetches it separately — without that, the
+one text field a lecturer reliably fills in produces no document at all. And
+the adapter still records `[Datei: name]` rather than downloading files, where
+the Stud.IP adapter extracts their contents; file download over Moodle web
+services is verified to work, so closing that is small and not yet done.
 
 ## File extraction: a deliberate fallback
 
@@ -193,13 +202,17 @@ bridge ships a **default PDF extractor** (`bridge/extract.py`), used by the
 Stud.IP adapter to index attachments **one document per page**.
 
 **It is a floor, not a destination.** ByCS's `local_ai_content` and OSKI.nrw's
-LMS-RAG both do this properly, with embeddings and a vector store; OSKI cites
+LMS-RAG are both aimed at this ground; OSKI cites
 filename and page number. Where either is deployed, point the retrieval provider
 at it and this extractor should not run. It exists because:
 
-- **Neither has shipped.** `local_ai_content` was a proof of concept as of
-  2026-08-18; OSKI's backend is unpublished. A contract whose grounded path
-  works only once someone else releases is a contract nobody can try today.
+- **Neither has shipped retrieval.** Reading `local_ai_content`'s source on
+  2026-08-27 (`v0.1.1`, 8 commits) found **no vector store, no embedding
+  purpose and no indexer** — what it ships is a text-extraction *service* for
+  other plugins to consume; the RAG parts exist in its DevCamp presentation,
+  not yet in the code. OSKI's backend is unpublished. A contract whose grounded
+  path works only once someone else releases is a contract nobody can try
+  today.
 - **Both target Moodle only.** ILIAS and Stud.IP have no engine to defer to.
 
 Scope is deliberately small: **PDF only, text only, no OCR.** A scanned PDF
