@@ -63,6 +63,7 @@ offer only what a deployment can actually do.
 
     ./demo.sh          # offline: fixtures, no credentials, no network
     ./demo-ui.sh       # against a live Stud.IP course (prompts for a password)
+    ./demo-moodle.sh   # against a live Moodle course (needs MOODLE_URL + MOODLE_TOKEN)
 
 Python 3.11+, **standard library only** — nothing to install.
 
