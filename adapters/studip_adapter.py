@@ -164,7 +164,8 @@ def _looks_extractable(name: str, mime: str) -> bool:
             or "officedocument" in m)
 
 
-def fetch_course_files(course_id: str, limit: int = 25) -> list[dict]:
+def fetch_course_files(course_id: str, limit: int = 25,
+                       course_name: str = "") -> list[dict]:
     """Extract text from a course's PDF attachments, one document per page.
 
     **This uses the bridge's fallback extractor, and only because nothing else
@@ -193,6 +194,7 @@ def fetch_course_files(course_id: str, limit: int = 25) -> list[dict]:
     except RuntimeError:
         return []
 
+    folders = _folder_names(course_id)
     docs: list[dict] = []
     for ref in refs.get("data", []) or []:
         a = ref.get("attributes", {}) or {}
@@ -253,6 +255,8 @@ def fetch_course_files(course_id: str, limit: int = 25) -> list[dict]:
                     "title": name,
                     "locator": locator,
                     "text": body,
+                    "course_name": course_name,
+                    "folder": _folder_of(ref, folders),
                 }
             )
             kept += 1
@@ -321,6 +325,38 @@ def fetch_course_media(course_id: str, limit: int = 25,
             "content_base64": base64.b64encode(blob).decode("ascii"),
         })
     return media
+
+
+def _folder_names(course_id: str) -> dict[str, str]:
+    """Map folder id -> display name for one course.
+
+    One request rather than one per file. Returns an empty map on any failure:
+    the folder is metadata for a citation, so losing it must cost the label and
+    never the document.
+
+    **This is about to matter for more than citations.** From 2026-09 the
+    Stud.IP maintainer is adding a folder *type* marking material a lecturer
+    released for AI (see the project handoff). When that ships, the folder stops
+    being only a label and becomes the thing that decides what may be indexed at
+    all — so it is worth reading properly now.
+    """
+    try:
+        payload = studip_get(f"/courses/{course_id}/folders?page[limit]=200")
+    except RuntimeError:
+        return {}
+    names: dict[str, str] = {}
+    for folder in payload.get("data", []) or []:
+        fid = folder.get("id")
+        name = str((folder.get("attributes") or {}).get("name") or "").strip()
+        if fid and name:
+            names[str(fid)] = name
+    return names
+
+
+def _folder_of(ref: dict, names: dict[str, str]) -> str:
+    """The display name of the folder a file-ref sits in, or ""."""
+    rel = ((ref.get("relationships") or {}).get("folder") or {}).get("data") or {}
+    return names.get(str(rel.get("id", "")), "")
 
 
 def fetch_course_documents(course_id: str) -> tuple[str, list[dict]]:
@@ -403,7 +439,13 @@ def fetch_course_documents(course_id: str) -> tuple[str, list[dict]]:
         pass
 
     # 5. PDF attachments, one document per page.
-    docs.extend(fetch_course_files(course_id))
+    docs.extend(fetch_course_files(course_id, course_name=title))
+
+    # Stamp the course name on everything rather than at each of the five call
+    # sites above: a document type added later would otherwise silently lose it,
+    # and HAWKI asked for the course to be on *every* citation.
+    for doc in docs:
+        doc.setdefault("course_name", title)
 
     return f"studip:{course_id}", docs
 

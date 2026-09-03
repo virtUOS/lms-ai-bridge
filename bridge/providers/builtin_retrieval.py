@@ -211,6 +211,8 @@ class BuiltinRetrieval(RetrievalProvider):
                         "activity_ref": doc.activity_ref,
                         "title": doc.title,
                         "locator": doc.locator,
+                        "course_name": doc.course_name,
+                        "folder": doc.folder,
                         "text": piece,
                         "tokens": tokenize(piece),
                     }
@@ -298,6 +300,8 @@ class BuiltinRetrieval(RetrievalProvider):
                 # being told only which file it came from.
                 locator=e.get("locator", ""),
                 activity_ref=e["activity_ref"],
+                course_name=e.get("course_name", ""),
+                folder=e.get("folder", ""),
                 score=round(s, 4),
             )
             for s, e in self._scored(course_ref, query, k)

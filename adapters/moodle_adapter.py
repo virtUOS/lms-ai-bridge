@@ -123,7 +123,8 @@ def moodle_download(fileurl: str) -> bytes:
     return blob
 
 
-def _file_documents(course_id: int, mod: dict) -> list[dict]:
+def _file_documents(course_id: int, mod: dict, course_name: str = "",
+                    section_name: str = "") -> list[dict]:
     """Download a module's files and return one document per page or slide.
 
     Mirrors the Stud.IP adapter: locators are "S. 12" for a PDF page and
@@ -179,6 +180,10 @@ def _file_documents(course_id: int, mod: dict) -> list[dict]:
                     "title": name,
                     "locator": locator,
                     "text": body,
+                    "course_name": course_name,
+                    # Moodle has no folders in the Stud.IP sense; the section is
+                    # the nearest honest equivalent and is what a student sees.
+                    "folder": section_name,
                 }
             )
             kept += 1
@@ -211,6 +216,7 @@ def fetch_course_documents(course_id: int) -> tuple[str, list[dict]]:
     """
     sections = moodle_call("core_course_get_contents", courseid=course_id)
     docs: list[dict] = []
+    course_title = ""
 
     # The course description, which `core_course_get_contents` does not return.
     # Worth a separate call: it is the one text field a lecturer reliably fills
@@ -223,13 +229,13 @@ def fetch_course_documents(course_id: int) -> tuple[str, list[dict]]:
         for course in moodle_call("core_course_get_courses") or []:
             if course.get("id") != course_id:
                 continue
+            course_title = strip_html(course.get("fullname", ""))
             summary = strip_html(course.get("summary", ""))
             if summary:
                 docs.append(
                     {
                         "activity_ref": f"moodle:{course_id}:course",
-                        "title": strip_html(course.get("fullname", ""))
-                        or "Kursbeschreibung",
+                        "title": course_title or "Kursbeschreibung",
                         "text": summary,
                     }
                 )
@@ -261,7 +267,13 @@ def fetch_course_documents(course_id: int) -> tuple[str, list[dict]]:
             # The files themselves, not their names. Until 2026-08-27 this
             # recorded "[Datei: skript.pdf]" and stopped, so a course whose
             # substance sits in attachments indexed as a list of filenames.
-            docs.extend(_file_documents(course_id, mod))
+            docs.extend(_file_documents(course_id, mod, course_title, sec_name))
+
+    # Stamped here rather than at each call site so a document type added later
+    # cannot silently lose it.
+    if course_title:
+        for doc in docs:
+            doc.setdefault("course_name", course_title)
 
     return f"moodle:{course_id}", docs
 

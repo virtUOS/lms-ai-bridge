@@ -169,6 +169,12 @@ Three decisions carry most of the weight:
 - **`sources` is always present**, empty when retrieval is unavailable, so
   adapters need no special-casing.
 
+A citation carries `title`, `locator` (`S. 12`), and — since 2026-09 —
+`course_name` and `folder`, so an answer can say *this document, on this page,
+in this folder, in this course* rather than naming a file alone. Both are
+optional: an adapter that cannot determine them keeps working, and the reader
+simply gets a shorter citation.
+
 ## What is verified, and what is not
 
 Verified against live instances on 2026-08-24:

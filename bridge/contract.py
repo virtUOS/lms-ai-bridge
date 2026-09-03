@@ -60,6 +60,12 @@ class Source:
     title: str
     locator: str = ""          # "S. 12", "Abschnitt 3.1", "" if not applicable
     activity_ref: str = ""     # opaque ref back into the LMS, if known
+    # Where the material sits, so an answer can say *this document, in this
+    # folder, in this course* rather than only naming a file. Requested by the
+    # HAWKI team, 2026-09-03. Both are display names for a human reading a
+    # citation — `activity_ref` remains the machine-readable handle.
+    course_name: str = ""      # "Funktionale Programmierung"
+    folder: str = ""           # "Skripte/Kapitel 3", "" at the course root
     score: float | None = None  # retrieval score, when the provider exposes one
 
 
@@ -119,6 +125,12 @@ class IndexDocument:
     title: str
     text: str
     locator: str = ""          # "S. 12" for one page of a PDF; "" for whole units
+    # Optional, because an adapter that cannot determine them must still work.
+    # On Stud.IP the folder carries a second meaning from 2026-09: a folder type
+    # marks material a lecturer released for AI, so the same value is both the
+    # consent marker and part of the citation.
+    course_name: str = ""
+    folder: str = ""
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "IndexDocument":
@@ -129,6 +141,8 @@ class IndexDocument:
             title=str(d.get("title") or "untitled"),
             text=str(d["text"]),
             locator=str(d.get("locator") or ""),
+            course_name=str(d.get("course_name") or ""),
+            folder=str(d.get("folder") or ""),
         )
 
 
