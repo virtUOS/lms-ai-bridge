@@ -70,7 +70,10 @@ TOOLS = [
             "List the courses currently in the local index, with chunk counts and the "
             "course_ref to use with search_course. Call this first."
         ),
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        # No `properties` key at all: an empty {} round-trips through PHP
+        # clients as [] (HAWKI's discovery log showed exactly that), and a
+        # strict validator rejects a list where it wants an object.
+        "inputSchema": {"type": "object", "additionalProperties": False},
     },
     {
         "name": "index_course",
