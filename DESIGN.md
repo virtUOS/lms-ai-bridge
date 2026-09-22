@@ -129,7 +129,8 @@ field, so adapters need no special-casing.
   the grounded path demonstrates end to end with citations.
 - Include **Moodle and Stud.IP adapters** exercised against your test instances,
   and an **ILIAS adapter written but marked untested** if no instance is
-  available.
+  available. (An instance arrived 2026-09-22; the adapter now targets ILIAS's
+  core SOAP interface — see `adapters/ilias_adapter.py`.)
 - Ship a `providers/` interface with two retrieval implementations: the built-in
   one, and a **stub showing how `local_ai_content` or OSKI would plug in** — the
   point being to show the seam, not to implement someone else's engine.

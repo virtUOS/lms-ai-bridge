@@ -11,8 +11,8 @@ Hochschullehre). Status: **working prototype**, not production software.
 
 An AI assistant that can answer questions about a course needs the course's
 material. Getting it out is the unglamorous part, and it is different on every
-platform: Stud.IP has a JSON-API, Moodle has web services, ILIAS has a REST
-plugin. Meanwhile the material itself is PDFs, slide decks, spreadsheets,
+platform: Stud.IP has a JSON-API, Moodle has web services, ILIAS has a SOAP
+server in core. Meanwhile the material itself is PDFs, slide decks, spreadsheets,
 structured Courseware pages and audio recordings.
 
 This component does that job and hands over text with the metadata that only
@@ -89,8 +89,9 @@ Verified against a production Stud.IP instance:
 - **Governance metadata** — licence and download permission per file
 
 Adapters: **Stud.IP** and **Moodle** both work against courses with content,
-extracting file contents with page and slide locators; **ILIAS** is written but
-has never run, for want of an instance.
+extracting file contents with page and slide locators; **ILIAS** likewise, over
+the core SOAP interface (the RESTPlugin it first assumed does not exist for
+ILIAS 10), verified end to end against a live ILIAS 10.11 on 2026-09-22.
 
 ## What does not work yet
 
@@ -184,7 +185,7 @@ Verified against live instances on 2026-08-24:
 | Bridge, end to end | **works** — index, grounded retrieval with citations, forget |
 | Stud.IP adapter | **works** against `studip-test.uni-osnabrueck.de` (JSON-API, HTTP Basic, no admin rights needed) |
 | Moodle adapter | **works** against `moodle-test-virtuos-openstack.uni-osnabrueck.de` (Moodle 5.1.3+): course description, module text and **file contents with page locators** — 36 documents and 97k characters from one course |
-| ILIAS adapter | **not written.** No instance was available |
+| ILIAS adapter | **works, 2026-09-22** against `lms-ai-bridge.test.hs-osnabrueck.de` (ILIAS 10.11, core SOAP, a read-only account): course description, syllabus and **file contents with page locators** — 37 documents from a seeded course, the scanned PDF refused with the OCR message. `./demo-ilias.sh 86` |
 
 **Verified against a course with content, 2026-08-27.** The first three test
 courses returned *zero* documents — not a bug: `core_course_get_contents`
