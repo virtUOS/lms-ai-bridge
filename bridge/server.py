@@ -31,6 +31,7 @@ from .contract import (
 from .providers.builtin_retrieval import BuiltinRetrieval
 from .demo_page import PAGE
 from .jobs import JobRunner
+from .mcp_server import handle as mcp_handle
 from .providers.embedding_retrieval import EmbeddingRetrieval
 from .providers.transcription import make_transcription
 from .providers.external_stub import ExternalHTTPRetrieval, NullRetrieval
@@ -281,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, f"invalid JSON: {e}")
 
         try:
+            if route == "/mcp":
+                return self._mcp(payload)
             if route == "/v1/chat":
                 return self._chat(payload)
             if route == "/v1/index":
@@ -404,6 +407,26 @@ class Handler(BaseHTTPRequestHandler):
             queued += 1
         return queued
 
+    def _mcp(self, payload: dict):
+        """The MCP server over HTTP: one JSON-RPC message per POST, JSON back.
+
+        Same handler and same retrieval provider as the stdio server, so the
+        two transports cannot drift. This is the shape HAWKI's MCP client
+        speaks (a plain POST with `Authorization: Bearer`, JSON body in
+        return), and the simplest form of MCP's streamable-HTTP transport. A
+        notification gets 202 and no body, per the transport spec.
+        """
+        if not isinstance(payload, dict):
+            return self._send(400, {"jsonrpc": "2.0", "id": None,
+                                    "error": {"code": -32600, "message": "invalid request"}})
+        reply = mcp_handle(payload, self.retrieval_provider)
+        if reply is None:
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        return self._send(200, reply)
+
     def _forget(self, payload: dict):
         course_ref = str(payload.get("course_ref") or "")
         if not course_ref:
@@ -434,6 +457,7 @@ def main() -> int:
     if not Handler.auth_token:
         print("  NOTE: BRIDGE_TOKEN unset — no authentication (prototype default).")
     print(f"  listening on http://{host}:{port}")
+    print(f"  MCP over HTTP      : POST http://{host}:{port}/mcp  (stdio: python3 -m bridge.mcp_server)")
     print()
 
     try:

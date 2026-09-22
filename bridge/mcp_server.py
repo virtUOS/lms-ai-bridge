@@ -36,6 +36,12 @@ as "unsupported", not as failure. Logging goes to stderr — stdout is the wire.
 
 The same providers and the same index file as the HTTP server: a course
 indexed by `demo-ilias.sh` is immediately searchable here.
+
+**Over HTTP as well:** the bridge's HTTP server mounts the same `handle()`
+at `POST /mcp` — one JSON-RPC message per request, JSON back, the bridge's
+bearer token for auth. That is the shape HAWKI's MCP client speaks and the
+simplest form of the streamable-HTTP transport. One handler, two transports,
+so they cannot drift apart.
 """
 
 from __future__ import annotations

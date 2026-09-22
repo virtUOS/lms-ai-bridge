@@ -148,6 +148,12 @@ host works: Claude Code, Claude Desktop, an IDE. It reads `.env` for the LMS
 credentials and the embedding model, and shares the index file with the HTTP
 server, so a course indexed by `demo-ilias.sh` is immediately searchable.
 
+The same tools are also served **over HTTP** by the bridge itself, at
+`POST /mcp` on the normal server (one JSON-RPC message per request, JSON in
+return, `Authorization: Bearer $BRIDGE_TOKEN`). That is the transport
+server-side hosts use — HAWKI registers an MCP server as a URL plus API key in
+its `config/tools.php` and calls it exactly this way.
+
 **`search_course` returns passages with citations and no answer.** The host's
 model writes the answer and cites the `citation` field; the tool adds a
 `confidence` flag (`ok`, `low`, `none`) so a loosely related result is not
