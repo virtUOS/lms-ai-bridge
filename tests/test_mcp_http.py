@@ -40,6 +40,7 @@ class TestMcpOverHttp(unittest.TestCase):
         bridge_server.Handler.chat_provider = EchoChat()
         bridge_server.Handler.transcription_provider = None
         bridge_server.Handler.auth_token = cls.token
+        bridge_server.Handler.mcp_keepalive_seconds = 0.05
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), bridge_server.Handler)
         cls.url = f"http://127.0.0.1:{cls.httpd.server_address[1]}/mcp"
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
@@ -49,6 +50,7 @@ class TestMcpOverHttp(unittest.TestCase):
         cls.httpd.shutdown()
         cls.httpd.server_close()
         bridge_server.Handler.auth_token = ""
+        bridge_server.Handler.mcp_keepalive_seconds = 15.0
         cls.tmp.cleanup()
 
     def post(self, message, token=None):
@@ -95,19 +97,40 @@ class TestMcpOverHttp(unittest.TestCase):
         self.assertEqual(status, 202)
         self.assertIsNone(body)
 
-    def test_get_stream_is_declined_with_405_and_delete_is_acknowledged(self):
-        """The MCP PHP SDK (HAWKI 2.5.2) opens a GET stream after initialize
-        and sends DELETE on close; the spec lets a server decline the first
-        and the SDK only logs the second. Neither may be a 404 or a 501."""
-        for method, expected in (("GET", 405), ("DELETE", 200)):
-            req = urllib.request.Request(self.url, method=method,
-                                         headers={"Authorization": f"Bearer {self.token}"})
-            try:
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    self.assertEqual(r.status, expected)
-            except urllib.error.HTTPError as e:
-                self.assertEqual(e.code, expected)
-                e.close()
+    def test_get_opens_a_live_stream_that_stays_open(self):
+        """HAWKI 2.5.2's MCP client (logiscape PHP SDK) opens a standalone GET
+        stream in a *forked copy of the PHP-FPM worker*. If the server declines
+        with 405, that child exits normally and, being a fork of the worker,
+        finishes the FastCGI request it inherited — the browser's answer stream
+        ends right after the tool call with no error anywhere (observed
+        2026-09-22, three models). So the GET must be a live SSE stream that
+        stays open until the client goes away; the child then blocks in curl
+        until HAWKI kills it at the end of the turn."""
+        req = urllib.request.Request(self.url, method="GET",
+                                     headers={"Authorization": f"Bearer {self.token}",
+                                              "Accept": "text/event-stream"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.status, 200)
+            self.assertTrue(r.headers.get("Content-Type", "").startswith("text/event-stream"))
+            self.assertEqual(r.readline(), b": keepalive\n")
+            # A second keepalive proves the stream is held open, not closed
+            # after one comment.
+            self.assertEqual(r.readline(), b"\n")
+            self.assertEqual(r.readline(), b": keepalive\n")
+
+    def test_get_stream_requires_the_token_and_delete_is_acknowledged(self):
+        """DELETE is what the SDK sends on close; it only logs the reply, but
+        the reply must not be a 404 or 501. A GET without the token is a 401,
+        like every other route."""
+        req = urllib.request.Request(self.url, method="GET")
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(cm.exception.code, 401)
+        cm.exception.close()
+        req = urllib.request.Request(self.url, method="DELETE",
+                                     headers={"Authorization": f"Bearer {self.token}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.status, 200)
 
     def test_rest_endpoints_still_work_beside_mcp(self):
         req = urllib.request.Request(self.url.replace("/mcp", "/v1/index/status?course_ref=ilias:86"),

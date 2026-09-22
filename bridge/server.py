@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -138,6 +139,9 @@ class Handler(BaseHTTPRequestHandler):
     transcription_provider = None
     jobs = None
     auth_token = ""
+    # Interval between keepalive comments on the MCP GET stream. A class
+    # attribute so tests can shorten it.
+    mcp_keepalive_seconds = 15.0
 
     # -- plumbing --
 
@@ -212,14 +216,20 @@ class Handler(BaseHTTPRequestHandler):
         route = self.path.split("?", 1)[0].rstrip("/")
 
         # MCP streamable HTTP: a client MAY open a GET stream for
-        # server-initiated messages; a server MAY decline with 405 and the
-        # client carries on without it. This server has nothing to push.
+        # server-initiated messages. The spec lets a server decline with 405,
+        # and this server has nothing to push — but declining breaks HAWKI.
+        # Its MCP client (logiscape PHP SDK, HAWKI 2.5.2) opens this stream in
+        # a forked copy of the PHP-FPM worker; on a 405 that child exits
+        # normally and, as a fork of the worker, finishes the FastCGI request
+        # it inherited — the browser's answer stream ends right after the
+        # tool call, with no error logged anywhere (2026-09-22). A live
+        # stream that stays open keeps the child blocked in curl until HAWKI
+        # kills it at the end of the turn, which is what every other MCP
+        # server it works with does.
         if route == "/mcp":
-            self.send_response(405)
-            self.send_header("Allow", "POST, DELETE")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return None
+            if not self._authorised():
+                return self._error(401, "missing or invalid bearer token")
+            return self._mcp_stream()
 
         # A demo surface, not a product — see bridge/demo_page.py. Served from
         # the bridge so there is no build step and nothing extra to run.
@@ -429,6 +439,28 @@ class Handler(BaseHTTPRequestHandler):
             self.jobs.submit(course_ref, title, work)
             queued += 1
         return queued
+
+    def _mcp_stream(self) -> None:
+        """Hold an empty SSE stream open until the client disconnects.
+
+        Only comments are ever sent — this server has no server-initiated
+        messages. The keepalive doubles as the disconnect detector: writing to
+        a socket the peer has closed raises, and the thread ends. See
+        `do_GET` for why this exists.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        try:
+            while True:
+                self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+                time.sleep(self.mcp_keepalive_seconds)
+        except OSError:
+            pass  # client went away; that is the normal end of this stream
+        self.close_connection = True
+        return None
 
     def _mcp(self, payload: dict):
         """The MCP server over HTTP: one JSON-RPC message per POST, JSON back.
