@@ -62,8 +62,10 @@ offer only what a deployment can actually do.
 ## Try it
 
     ./demo.sh          # offline: fixtures, no credentials, no network
-    ./demo-ui.sh       # against a live Stud.IP course (prompts for a password)
+    ./demo-ui.sh       # browser page against a live Stud.IP course (prompts for a password)
+    ./demo-studip.sh   # against a live Stud.IP course (needs STUDIP_URL + credentials)
     ./demo-moodle.sh   # against a live Moodle course (needs MOODLE_URL + MOODLE_TOKEN)
+    ./demo-ilias.sh    # against a live ILIAS course (needs ILIAS_URL, ILIAS_CLIENT, ILIAS_USER, ILIAS_PASSWORD)
 
 Python 3.11+, **standard library only** — nothing to install.
 
