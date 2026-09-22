@@ -204,6 +204,11 @@ class EmbeddingRetrieval(RetrievalProvider):
     def passages(self, course_ref: str, query: str, k: int = 4) -> list[str]:
         return [e["text"] for _, e in self._scored(course_ref, query, k)]
 
+    def courses(self) -> dict[str, int]:
+        """course_ref -> chunk count for everything indexed (see BuiltinRetrieval)."""
+        with self._lock:
+            return {ref: len(entries) for ref, entries in self._store.items()}
+
     def count(self, course_ref: str) -> int:
         """How many chunks are stored for a course. 0 means not indexed."""
         with self._lock:

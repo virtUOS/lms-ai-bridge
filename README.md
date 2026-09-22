@@ -66,6 +66,7 @@ offer only what a deployment can actually do.
     ./demo-studip.sh   # against a live Stud.IP course (needs STUDIP_URL + credentials)
     ./demo-moodle.sh   # against a live Moodle course (needs MOODLE_URL + MOODLE_TOKEN)
     ./demo-ilias.sh    # against a live ILIAS course (needs ILIAS_URL, ILIAS_CLIENT, ILIAS_USER, ILIAS_PASSWORD)
+    python3 -m bridge.mcp_server   # the same contract as an MCP server, for Claude Code/Desktop and other hosts
 
 Python 3.11+, **standard library only** — nothing to install.
 
@@ -135,6 +136,32 @@ transcribe, who pays, what is the retention policy* — nine implementations
 across three platforms, which is what the research found happening. With it: one
 contract, three thin adapters, and every AI capability is a slot filled by
 whatever the institution already runs.
+
+## As an MCP server
+
+    claude mcp add lms-ai-bridge -- python3 /path/to/lms-ai-bridge/bridge/mcp_server.py
+
+`bridge/mcp_server.py` exposes the contract over MCP's stdio transport — stdlib
+only, no SDK — as four tools: `list_indexed_courses`, `index_course(platform,
+course_id)`, `search_course(course_ref, query)` and `forget_course`. Any MCP
+host works: Claude Code, Claude Desktop, an IDE. It reads `.env` for the LMS
+credentials and the embedding model, and shares the index file with the HTTP
+server, so a course indexed by `demo-ilias.sh` is immediately searchable.
+
+**`search_course` returns passages with citations and no answer.** The host's
+model writes the answer and cites the `citation` field; the tool adds a
+`confidence` flag (`ok`, `low`, `none`) so a loosely related result is not
+mistaken for coverage. This keeps the bridge out of the generation business,
+which is the whole argument of this prototype.
+
+**Who this is for.** The MCP server runs *as the user*, with that user's own
+LMS credentials — so it can only extract what they may see, and per-user
+authorisation costs nothing. That makes it the right shape for individuals
+and for other AI applications. It is **not** how course data reaches HAWKI:
+HAWKI has its own store and resolves permissions through an admin-level LMS
+connection, and pointing it at this server with admin credentials would put
+that problem back on the bridge. See [HAWKI.md] in the research repository
+(internal) for the division of labour.
 
 ## Seeing it work
 
