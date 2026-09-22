@@ -193,10 +193,33 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):  # noqa: N802
         self._send(204, {})
 
+    def do_DELETE(self):  # noqa: N802
+        # MCP session termination. This server issues no session ids, so
+        # there is nothing to end; acknowledge so a well-behaved client's
+        # close() is quiet rather than logging a failure.
+        if self.path.rstrip("/") == "/mcp":
+            if not self._authorised():
+                return self._error(401, "missing or invalid bearer token")
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        return self._error(404, f"no such endpoint: {self.path}")
+
     # -- routes --
 
     def do_GET(self):  # noqa: N802
         route = self.path.split("?", 1)[0].rstrip("/")
+
+        # MCP streamable HTTP: a client MAY open a GET stream for
+        # server-initiated messages; a server MAY decline with 405 and the
+        # client carries on without it. This server has nothing to push.
+        if route == "/mcp":
+            self.send_response(405)
+            self.send_header("Allow", "POST, DELETE")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
 
         # A demo surface, not a product — see bridge/demo_page.py. Served from
         # the bridge so there is no build step and nothing extra to run.

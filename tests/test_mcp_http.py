@@ -95,6 +95,20 @@ class TestMcpOverHttp(unittest.TestCase):
         self.assertEqual(status, 202)
         self.assertIsNone(body)
 
+    def test_get_stream_is_declined_with_405_and_delete_is_acknowledged(self):
+        """The MCP PHP SDK (HAWKI 2.5.2) opens a GET stream after initialize
+        and sends DELETE on close; the spec lets a server decline the first
+        and the SDK only logs the second. Neither may be a 404 or a 501."""
+        for method, expected in (("GET", 405), ("DELETE", 200)):
+            req = urllib.request.Request(self.url, method=method,
+                                         headers={"Authorization": f"Bearer {self.token}"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    self.assertEqual(r.status, expected)
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, expected)
+                e.close()
+
     def test_rest_endpoints_still_work_beside_mcp(self):
         req = urllib.request.Request(self.url.replace("/mcp", "/v1/index/status?course_ref=ilias:86"),
                                      headers={"Authorization": f"Bearer {self.token}"})
