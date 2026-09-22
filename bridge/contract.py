@@ -213,6 +213,18 @@ class RetrievalProvider:
         """The text behind the sources, for prompt construction."""
         raise NotImplementedError
 
+    def search(self, course_ref: str, query: str, k: int = 4) -> list[tuple[Source, str]]:
+        """Citations *with* their passage text, in one call.
+
+        `retrieve` deliberately returns citations only — /v1/chat sends the
+        passages to the model, not to the LMS. A consumer that has to do the
+        answering itself (the MCP server) needs both. Default is correct but
+        scores twice; providers override it.
+        """
+        cites = self.retrieve(course_ref, query, k)
+        texts = self.passages(course_ref, query, k)
+        return list(zip(cites, texts + [""] * (len(cites) - len(texts))))
+
     def count(self, course_ref: str) -> int:
         """How many chunks are stored for a course. 0 means not indexed.
 

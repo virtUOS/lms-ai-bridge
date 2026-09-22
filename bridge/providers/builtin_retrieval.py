@@ -310,6 +310,20 @@ class BuiltinRetrieval(RetrievalProvider):
     def passages(self, course_ref: str, query: str, k: int = 4) -> list[str]:
         return [e["text"] for _, e in self._scored(course_ref, query, k)]
 
+    def search(self, course_ref: str, query: str, k: int = 4) -> list[tuple[Source, str]]:
+        return [(self._source(s, e), e["text"]) for s, e in self._scored(course_ref, query, k)]
+
+    @staticmethod
+    def _source(score: float, e: dict) -> Source:
+        return Source(
+            title=e["title"],
+            locator=e.get("locator", ""),
+            activity_ref=e["activity_ref"],
+            course_name=e.get("course_name", ""),
+            folder=e.get("folder", ""),
+            score=round(score, 4),
+        )
+
     def courses(self) -> dict[str, int]:
         """course_ref -> chunk count for everything indexed. For the MCP
         server's listing; the HTTP contract asks per course instead."""

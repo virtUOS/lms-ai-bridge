@@ -203,10 +203,15 @@ def tool_search_course(provider, args: dict) -> dict:
             f"index_course to pull it from the LMS."
         )
     k = int(args.get("k") or 6)
-    hits = provider.retrieve(course_ref, str(args["query"]), k=max(1, min(k, 20)))
+    # search(), not retrieve(): retrieve() returns citations only, which is
+    # right for /v1/chat (the model gets the passages, the LMS gets the
+    # citations) and useless here, where the host model IS the answerer. The
+    # first live run returned page numbers with no text — 2026-09-22.
+    hits = provider.search(course_ref, str(args["query"]), k=max(1, min(k, 20)))
     passages = []
-    for s in hits:
+    for s, text in hits:
         d = asdict(s)
+        d["text"] = text
         d["citation"] = _citation(s)
         passages.append(d)
     out = {"course_ref": course_ref, "passages": passages}

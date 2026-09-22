@@ -41,6 +41,9 @@ class FakeRetrieval:
                    course_name="Generative KI", folder="Skripte", score=0.81),
         ][:k]
 
+    def search(self, course_ref, query, k=4):
+        return [(s, "Ein Monad ist eine algebraische Struktur …") for s in self.retrieve(course_ref, query, k)]
+
     def index(self, req):
         self.indexed.append(req)
         self.store[req.course_ref] = len(req.documents)
@@ -134,11 +137,14 @@ class TestTools(unittest.TestCase):
         self.assertEqual(hit["course_name"], "Generative KI")
         self.assertEqual(hit["folder"], "Skripte")
         self.assertEqual(hit["citation"], "Skript.pdf, S. 12 (Generative KI / Skripte)")
+        # The first live run returned citations without the passage text — the
+        # host model had page numbers and nothing to read. Never again.
+        self.assertTrue(hit["text"].startswith("Ein Monad"))
 
     def test_search_flags_loosely_related_passages(self):
         provider = FakeRetrieval()
         weak = Source(title="x.pdf", locator="S. 7", score=0.45)
-        with mock.patch.object(provider, "retrieve", return_value=[weak]):
+        with mock.patch.object(provider, "search", return_value=[(weak, "…")]):
             body = payload(run([call("search_course", {"course_ref": "ilias:86", "query": "Studiengebühr?"})], provider)[0])
         self.assertEqual(body["confidence"], "low")
         self.assertIn("does not cover", body["note"])
