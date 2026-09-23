@@ -155,6 +155,7 @@ class EmbeddingRetrieval(RetrievalProvider):
                         "locator": doc.locator,
                         "course_name": doc.course_name,
                         "folder": doc.folder,
+                        "licence": doc.licence,
                         "text": piece,
                     }
                 )
@@ -196,6 +197,7 @@ class EmbeddingRetrieval(RetrievalProvider):
                 activity_ref=e["activity_ref"],
                 course_name=e.get("course_name", ""),
                 folder=e.get("folder", ""),
+                licence=e.get("licence", ""),
                 score=round(s, 4),
             )
             for s, e in self._scored(course_ref, query, k)
@@ -215,6 +217,7 @@ class EmbeddingRetrieval(RetrievalProvider):
             activity_ref=e["activity_ref"],
             course_name=e.get("course_name", ""),
             folder=e.get("folder", ""),
+            licence=e.get("licence", ""),
             score=round(score, 4),
         )
 

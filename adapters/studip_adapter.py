@@ -145,6 +145,17 @@ _EXTRACTABLE_SUFFIXES = (
 )
 
 
+def _licence_of(ref: dict) -> str:
+    """The `terms-of-use` id Stud.IP reports for a file-ref, or "" if none.
+
+    Empty means "the API said nothing", which is different from
+    `UNDEF_LICENSE`, Stud.IP's own value for "the uploader chose no licence".
+    Both are kept as they are; neither is upgraded to a guess.
+    """
+    terms = ((ref.get("relationships") or {}).get("terms-of-use") or {}).get("data") or {}
+    return str(terms.get("id") or "")
+
+
 def _looks_extractable(name: str, mime: str) -> bool:
     """Filter on the metadata before spending a download on a file.
 
@@ -240,6 +251,11 @@ def fetch_course_files(course_id: str, limit: int = 25,
             print(f"  skipped {name}: {e}", file=sys.stderr)
             continue
 
+        # Stud.IP's terms-of-use id per file: "CC_BY", "SELFMADE_NONPUB",
+        # "UNDEF_LICENSE" when the uploader chose none, "" when the API did
+        # not report the relationship at all. Stored with every unit, because
+        # the index is a copy of the material and the licence governs the copy.
+        licence = _licence_of(ref)
         kept = 0
         for locator, text in units:
             body = re.sub(r"\s+", " ", text).strip()
@@ -257,13 +273,12 @@ def fetch_course_files(course_id: str, limit: int = 25,
                     "text": body,
                     "course_name": course_name,
                     "folder": _folder_of(ref, folders),
+                    "licence": licence,
                 }
             )
             kept += 1
-        terms = ((ref.get("relationships") or {}).get("terms-of-use") or {}).get("data") or {}
-        licence = terms.get("id", "unknown")
-        print(f"  {name}: {kept}/{len(units)} units with text  [licence: {licence}]",
-              file=sys.stderr)
+        print(f"  {name}: {kept}/{len(units)} units with text  "
+              f"[licence: {licence or 'not reported'}]", file=sys.stderr)
 
     return docs
 
@@ -316,12 +331,13 @@ def fetch_course_media(course_id: str, limit: int = 25,
             print(f"  skipped {name}: {e}", file=sys.stderr)
             continue
 
-        terms = ((ref.get("relationships") or {}).get("terms-of-use") or {}).get("data") or {}
+        licence = _licence_of(ref)
         print(f"  {name}: {len(blob) / 1_000_000:.1f} MB queued for transcription "
-              f"[licence: {terms.get('id', 'unknown')}]", file=sys.stderr)
+              f"[licence: {licence or 'not reported'}]", file=sys.stderr)
         media.append({
             "activity_ref": f"studip:{course_id}:file:{ref_id}",
             "title": name,
+            "licence": licence,
             "content_base64": base64.b64encode(blob).decode("ascii"),
         })
     return media

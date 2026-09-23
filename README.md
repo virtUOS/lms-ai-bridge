@@ -209,7 +209,10 @@ A citation carries `title`, `locator` (`S. 12`), and — since 2026-09 —
 `course_name` and `folder`, so an answer can say *this document, on this page,
 in this folder, in this course* rather than naming a file alone. Both are
 optional: an adapter that cannot determine them keeps working, and the reader
-simply gets a shorter citation.
+simply gets a shorter citation. Since 2026-09-23 a source also carries
+`licence`: the terms-of-use id Stud.IP reports per file (`CC_BY`,
+`UNDEF_LICENSE` for "none chosen"), empty where the LMS reports none — Moodle
+and ILIAS do not. It is stored, not enforced: nothing is filtered on it yet.
 
 ## What is verified, and what is not
 

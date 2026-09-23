@@ -417,16 +417,17 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             title = str(item.get("title") or "Aufnahme")
             activity_ref = str(item.get("activity_ref") or "")
+            licence = str(item.get("licence") or "")
             try:
                 blob = base64.b64decode(item["content_base64"])
             except (ValueError, TypeError):
                 continue
 
-            def work(blob=blob, title=title, activity_ref=activity_ref):
+            def work(blob=blob, title=title, activity_ref=activity_ref, licence=licence):
                 units = self.transcription_provider.transcribe(blob, title)
                 docs = [
                     {"activity_ref": activity_ref, "title": title,
-                     "locator": locator, "text": text}
+                     "locator": locator, "text": text, "licence": licence}
                     for locator, text in units if text.strip()
                 ]
                 if docs:

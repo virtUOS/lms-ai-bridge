@@ -214,6 +214,32 @@ class TestSourcePath(unittest.TestCase):
         self.assertEqual(got[0].course_name, "Funktionale Programmierung")
         self.assertEqual(got[0].folder, "Skripte/Kapitel 3")
 
+    def test_index_document_carries_licence(self):
+        """Stud.IP reports terms-of-use per file. Indexing copies material
+        into a store, so the licence it arrived under must travel with it
+        (added 2026-09-23)."""
+        d = IndexDocument.from_dict({"title": "x", "text": "y", "licence": "CC_BY"})
+        self.assertEqual(d.licence, "CC_BY")
+
+    def test_licence_is_optional_and_empty_by_default(self):
+        """Moodle and ILIAS do not report one; an undefined Stud.IP licence
+        must not be dressed up as a value either."""
+        self.assertEqual(IndexDocument.from_dict({"title": "x", "text": "y"}).licence, "")
+        self.assertEqual(Source(title="x").licence, "")
+
+    def test_licence_survives_indexing_and_reaches_the_source(self):
+        r = BuiltinRetrieval()
+        r.index(IndexRequest(course_ref="studip:abc", documents=[
+            IndexDocument(activity_ref="studip:abc:file:1", title="Skript.pdf",
+                          text="Monaden sind Monoide in der Kategorie der Endofunktoren.",
+                          licence="SELFMADE_NONPUB")
+        ]))
+        got = r.retrieve("studip:abc", "Monaden")
+        self.assertTrue(got)
+        self.assertEqual(got[0].licence, "SELFMADE_NONPUB")
+        hits = r.search("studip:abc", "Monaden")
+        self.assertEqual(hits[0][0].licence, "SELFMADE_NONPUB")
+
     def test_a_source_without_them_still_serialises(self):
         s = Source(title="x").to_dict() if hasattr(Source(title="x"), "to_dict") else None
         if s is not None:

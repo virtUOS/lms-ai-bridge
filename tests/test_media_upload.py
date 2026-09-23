@@ -72,6 +72,10 @@ class TestMediaCollection(unittest.TestCase):
         self.assertEqual(base64.b64decode(media[0]["content_base64"]),
                          b"AUDIOBYTES-a1")
 
+    def test_licence_travels_with_the_media_item(self):
+        media = A.fetch_course_media("C")
+        self.assertEqual(media[0]["licence"], "SELFMADE_NONPUB")
+
     def test_activity_ref_points_back_into_the_lms(self):
         media = A.fetch_course_media("C")
         self.assertEqual(media[0]["activity_ref"], "studip:C:file:a1")

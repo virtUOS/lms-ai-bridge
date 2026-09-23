@@ -66,6 +66,12 @@ class Source:
     # citation — `activity_ref` remains the machine-readable handle.
     course_name: str = ""      # "Funktionale Programmierung"
     folder: str = ""           # "Skripte/Kapitel 3", "" at the course root
+    # The licence the file arrived under, as the LMS reports it (Stud.IP:
+    # `terms-of-use` id such as "CC_BY" or "UNDEF_LICENSE"). "" when the LMS
+    # reports none — Moodle and ILIAS do not — never a guess. Added 2026-09-23
+    # because indexing copies material into a store, and the licence is the
+    # first thing a data-protection review asks about that copy.
+    licence: str = ""
     score: float | None = None  # retrieval score, when the provider exposes one
 
 
@@ -131,6 +137,7 @@ class IndexDocument:
     # consent marker and part of the citation.
     course_name: str = ""
     folder: str = ""
+    licence: str = ""          # see Source.licence
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "IndexDocument":
@@ -143,6 +150,7 @@ class IndexDocument:
             locator=str(d.get("locator") or ""),
             course_name=str(d.get("course_name") or ""),
             folder=str(d.get("folder") or ""),
+            licence=str(d.get("licence") or ""),
         )
 
 
