@@ -154,6 +154,18 @@ return, `Authorization: Bearer $BRIDGE_TOKEN`). That is the transport
 server-side hosts use — HAWKI registers an MCP server as a URL plus API key in
 its `config/tools.php` and calls it exactly this way.
 
+**Per-user tokens (optional, first step).** `/mcp` can also accept a user's
+own OIDC access token, as LibreChat sends it with `Authorization: Bearer
+{{LIBRECHAT_OPENID_ACCESS_TOKEN}}` (v0.8.8 refreshes it and retries on a 401).
+The bridge checks each token by introspection at the configured issuer
+(`BRIDGE_OIDC_*` in `.env.example`) and learns the username. A user caller gets
+only `list_indexed_courses` and `search_course`, and the REST routes refuse
+them. The static `BRIDGE_TOKEN` keeps full access, unchanged. **Which courses a
+user may search is not solved yet:** knowing who the user is does not open the
+LMS as that user, and the per-user membership check is still to be built.
+Until then `BRIDGE_USER_COURSES` is `none` (a user sees nothing) or, for
+testing only, `all`.
+
 **`search_course` returns passages with citations and no answer.** The host's
 model writes the answer and cites the `citation` field; the tool adds a
 `confidence` flag (`ok`, `low`, `none`) so a loosely related result is not

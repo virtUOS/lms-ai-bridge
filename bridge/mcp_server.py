@@ -42,6 +42,12 @@ at `POST /mcp` — one JSON-RPC message per request, JSON back, the bridge's
 bearer token for auth. That is the shape HAWKI's MCP client speaks and the
 simplest form of the streamable-HTTP transport. One handler, two transports,
 so they cannot drift apart.
+
+**Per-user over HTTP, first step (2026-09-29):** `/mcp` also accepts a user's
+own OIDC access token (bridge/auth.py), which LibreChat can forward per user.
+Such a caller gets the read tools only, over the courses a policy lets them
+see. What that policy should be — the LMS's own answer to "is this user in this
+course" — is not built yet, so the default shows a user nothing.
 """
 
 from __future__ import annotations
@@ -258,6 +264,36 @@ TOOL_HANDLERS = {
     "forget_course": tool_forget_course,
 }
 
+# What a user caller (their own token, see bridge/auth.py) may use. Indexing
+# runs the adapters with the bridge's own LMS credentials and forgetting deletes
+# a course for everyone; both stay with the service caller.
+READ_TOOLS = ("list_indexed_courses", "search_course")
+
+
+class _UserView:
+    """The index as one user may see it: only the courses `may_see` allows.
+
+    A hidden course is simply absent — counted as zero, searched as empty — so
+    the tools report it exactly as they report a course that was never indexed,
+    and the error text does not tell a user which courses exist.
+    """
+
+    def __init__(self, provider, user, may_see):
+        self._provider, self._user, self._may_see = provider, user, may_see
+        self.name = provider.name
+
+    def _visible(self, course_ref: str) -> bool:
+        return self._may_see is not None and bool(self._may_see(self._user, course_ref))
+
+    def courses(self) -> dict[str, int]:
+        return {ref: n for ref, n in _courses(self._provider).items() if self._visible(ref)}
+
+    def count(self, course_ref: str) -> int:
+        return self._provider.count(course_ref) if self._visible(course_ref) else 0
+
+    def search(self, course_ref: str, query: str, k: int = 6):
+        return self._provider.search(course_ref, query, k=k) if self._visible(course_ref) else []
+
 
 # --------------------------------------------------------------------------
 # JSON-RPC loop
@@ -279,8 +315,15 @@ def _tool_result(payload: dict, is_error: bool = False) -> dict:
     return out
 
 
-def handle(msg: dict, provider) -> dict | None:
-    """Answer one JSON-RPC message; None for notifications."""
+def handle(msg: dict, provider, user=None, may_see=None) -> dict | None:
+    """Answer one JSON-RPC message; None for notifications.
+
+    `user` is None for the service caller (stdio, or the static bridge token),
+    which keeps every tool. A user caller gets `READ_TOOLS` over the courses
+    `may_see(user, course_ref)` allows; with no `may_see`, none.
+    """
+    if user is not None:
+        provider = _UserView(provider, user, may_see)
     method = msg.get("method")
     rid = msg.get("id")
     params = msg.get("params") or {}
@@ -301,10 +344,11 @@ def handle(msg: dict, provider) -> dict | None:
     if method == "ping":
         return _result(rid, {})
     if method == "tools/list":
-        return _result(rid, {"tools": TOOLS})
+        tools = TOOLS if user is None else [t for t in TOOLS if t["name"] in READ_TOOLS]
+        return _result(rid, {"tools": tools})
     if method == "tools/call":
         name = params.get("name", "")
-        handler = TOOL_HANDLERS.get(name)
+        handler = TOOL_HANDLERS.get(name) if user is None or name in READ_TOOLS else None
         if handler is None:
             return _result(rid, _tool_result({"error": f"unknown tool {name!r}"}, is_error=True))
         try:

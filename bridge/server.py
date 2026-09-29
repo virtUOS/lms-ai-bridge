@@ -22,6 +22,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .auth import CoursePolicy, IdentityProviderError, authenticate, issuers_from_env
 from .contract import (
     CONTRACT_VERSION,
     ChatRequest,
@@ -139,6 +140,10 @@ class Handler(BaseHTTPRequestHandler):
     transcription_provider = None
     jobs = None
     auth_token = ""
+    # Per-user tokens (bridge/auth.py): which identity providers are trusted,
+    # and which courses their users may search. Set in main().
+    identity_issuers: list = []
+    course_policy = CoursePolicy("none")
     # Interval between keepalive comments on the MCP GET stream. A class
     # attribute so tests can shorten it.
     mcp_keepalive_seconds = 15.0
@@ -148,9 +153,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter, and to stderr
         sys.stderr.write(f"  {self.address_string()} {fmt % args}\n")
 
-    def _send(self, code: int, payload: dict) -> None:
+    def _send(self, code: int, payload: dict, headers: dict | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -167,14 +174,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _error(self, code: int, message: str) -> None:
-        self._send(code, {"error": {"code": code, "message": message}})
+    def _error(self, code: int, message: str, headers: dict | None = None) -> None:
+        self._send(code, {"error": {"code": code, "message": message}}, headers)
 
-    def _authorised(self) -> bool:
-        if not self.auth_token:
-            return True
-        header = self.headers.get("Authorization", "")
-        return header == f"Bearer {self.auth_token}"
+    def _caller(self):
+        """Who is calling (bridge/auth.py), or None once a refusal is sent.
+
+        A refused token is a 401 with a Bearer challenge — the one answer on
+        which LibreChat refreshes the user's token and retries. An identity
+        provider that cannot answer is a 503: the user can fix nothing by
+        signing in again, and the operator needs to see it in the log.
+        """
+        try:
+            caller = authenticate(self.headers.get("Authorization", ""),
+                                  self.auth_token, self.identity_issuers)
+        except IdentityProviderError as e:
+            sys.stderr.write(f"  identity provider: {e}\n")
+            self._error(503, "identity provider unavailable; see server log")
+            return None
+        if caller is None:
+            self._error(401, "missing or invalid bearer token",
+                        {"WWW-Authenticate": 'Bearer realm="lms-ai-bridge"'})
+        return caller
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -202,8 +223,8 @@ class Handler(BaseHTTPRequestHandler):
         # there is nothing to end; acknowledge so a well-behaved client's
         # close() is quiet rather than logging a failure.
         if self.path.rstrip("/") == "/mcp":
-            if not self._authorised():
-                return self._error(401, "missing or invalid bearer token")
+            if self._caller() is None:
+                return None
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -227,8 +248,8 @@ class Handler(BaseHTTPRequestHandler):
         # kills it at the end of the turn, which is what every other MCP
         # server it works with does.
         if route == "/mcp":
-            if not self._authorised():
-                return self._error(401, "missing or invalid bearer token")
+            if self._caller() is None:
+                return None
             return self._mcp_stream()
 
         # A demo surface, not a product — see bridge/demo_page.py. Served from
@@ -303,10 +324,16 @@ class Handler(BaseHTTPRequestHandler):
         return self._error(404, f"no such endpoint: {self.path}")
 
     def do_POST(self):  # noqa: N802
-        if not self._authorised():
-            return self._error(401, "missing or invalid bearer token")
+        caller = self._caller()
+        if caller is None:
+            return None
 
         route = self.path.rstrip("/")
+        # A user's own token reaches the MCP tools, which filter by what that
+        # user may see. The REST routes index, forget and answer for any course
+        # and were built for the service caller; they stay that way.
+        if caller.kind != "service" and route != "/mcp":
+            return self._error(403, "per-user tokens are accepted on /mcp only")
         try:
             payload = self._read_json()
         except ValueError as e:
@@ -316,7 +343,7 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if route == "/mcp":
-                return self._mcp(payload)
+                return self._mcp(payload, caller)
             if route == "/v1/chat":
                 return self._chat(payload)
             if route == "/v1/index":
@@ -463,7 +490,7 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         return None
 
-    def _mcp(self, payload: dict):
+    def _mcp(self, payload: dict, caller):
         """The MCP server over HTTP: one JSON-RPC message per POST, JSON back.
 
         Same handler and same retrieval provider as the stdio server, so the
@@ -471,11 +498,16 @@ class Handler(BaseHTTPRequestHandler):
         speaks (a plain POST with `Authorization: Bearer`, JSON body in
         return), and the simplest form of MCP's streamable-HTTP transport. A
         notification gets 202 and no body, per the transport spec.
+
+        The service caller sees everything, as before; a user caller sees what
+        `course_policy` lets them (bridge/auth.py).
         """
         if not isinstance(payload, dict):
             return self._send(400, {"jsonrpc": "2.0", "id": None,
                                     "error": {"code": -32600, "message": "invalid request"}})
-        reply = mcp_handle(payload, self.retrieval_provider)
+        user = None if caller.kind == "service" else caller
+        reply = mcp_handle(payload, self.retrieval_provider,
+                           user=user, may_see=self.course_policy)
         if reply is None:
             self.send_response(202)
             self.send_header("Content-Length", "0")
@@ -502,6 +534,8 @@ def main() -> int:
     Handler.jobs = JobRunner(
         max_workers=int(os.environ.get("ASR_MAX_CONCURRENT", "2")))
     Handler.auth_token = os.environ.get("BRIDGE_TOKEN", "")
+    Handler.identity_issuers = issuers_from_env()
+    Handler.course_policy = CoursePolicy(os.environ.get("BRIDGE_USER_COURSES", "none"))
 
     print(f"LMS AI Bridge {CONTRACT_VERSION}")
     print(f"  chat provider      : {chat.name}")
@@ -510,7 +544,13 @@ def main() -> int:
     print(f"  retrieval provider : {retrieval.name}")
     if isinstance(chat, EchoChat):
         print("  NOTE: no OPENAI_BASE_URL configured — running in offline echo mode.")
-    if not Handler.auth_token:
+    for issuer in Handler.identity_issuers:
+        print(f"  per-user tokens    : {issuer.issuer} (audience {issuer.audience}), "
+              f"courses: {Handler.course_policy.mode}")
+    if Handler.identity_issuers and Handler.course_policy.mode == "all":
+        print("  NOTE: BRIDGE_USER_COURSES=all — every signed-in user can search every "
+              "indexed course. For testing the login path only.")
+    if not Handler.auth_token and not Handler.identity_issuers:
         print("  NOTE: BRIDGE_TOKEN unset — no authentication (prototype default).")
     print(f"  listening on http://{host}:{port}")
     print(f"  MCP over HTTP      : POST http://{host}:{port}/mcp  (stdio: python3 -m bridge.mcp_server)")
