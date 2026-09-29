@@ -545,8 +545,15 @@ def main() -> int:
     if isinstance(chat, EchoChat):
         print("  NOTE: no OPENAI_BASE_URL configured — running in offline echo mode.")
     for issuer in Handler.identity_issuers:
-        print(f"  per-user tokens    : {issuer.issuer} (audience {issuer.audience}), "
+        checked = (f"introspection, audience {issuer.audience}" if issuer.mode == "introspection"
+                   else f"userinfo, clients {', '.join(issuer.allowed_clients)}")
+        print(f"  per-user tokens    : {issuer.issuer} ({checked}), "
               f"courses: {Handler.course_policy.mode}")
+        if issuer.mode == "userinfo":
+            print("  WARNING: userinfo mode accepts any genuine token from the allowed clients; "
+                  "it cannot check that a token was issued for this bridge, which the MCP "
+                  "authorisation spec requires. Set BRIDGE_OIDC_CLIENT_ID/SECRET (introspection) "
+                  "once the identity provider has a client for the bridge.")
     if Handler.identity_issuers and Handler.course_policy.mode == "all":
         print("  NOTE: BRIDGE_USER_COURSES=all — every signed-in user can search every "
               "indexed course. For testing the login path only.")

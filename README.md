@@ -157,8 +157,11 @@ its `config/tools.php` and calls it exactly this way.
 **Per-user tokens (optional, first step).** `/mcp` can also accept a user's
 own OIDC access token, as LibreChat sends it with `Authorization: Bearer
 {{LIBRECHAT_OPENID_ACCESS_TOKEN}}` (v0.8.8 refreshes it and retries on a 401).
-The bridge checks each token by introspection at the configured issuer
-(`BRIDGE_OIDC_*` in `.env.example`) and learns the username. A user caller gets
+The bridge checks each token at the configured issuer (`BRIDGE_OIDC_*` in
+`.env.example`) and learns the username — by introspection, with an audience
+check, when it has a client of its own there; otherwise through the userinfo
+endpoint, which proves the token genuine but not that it was meant for the
+bridge (a stopgap the server warns about, not what the MCP spec asks for). A user caller gets
 only `list_indexed_courses` and `search_course`, and the REST routes refuse
 them. The static `BRIDGE_TOKEN` keeps full access, unchanged. **Which courses a
 user may search is not solved yet:** knowing who the user is does not open the

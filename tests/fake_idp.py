@@ -6,8 +6,14 @@ university realm, 2026-09-29): the full claim set for an active token, and only
 `{"active": false}` for anything else — Keycloak says nothing more about a token
 it will not vouch for.
 
-Tokens are JWT-shaped but unsigned. The bridge reads the unverified `iss` only
-to decide which identity provider to ask; the answer comes from introspection.
+Userinfo answers the Keycloak way too: the user's profile claims for a token it
+accepts, and a 401 with a Bearer challenge for one it does not (expired,
+revoked, or not an access token).
+
+Tokens are JWT-shaped but unsigned, and carry their claims in the payload as a
+Keycloak access token does. The bridge reads that payload unverified to decide
+which identity provider to ask, and — in userinfo mode, only after the provider
+has accepted the very same token — for `azp` and the username.
 """
 
 import base64
@@ -37,15 +43,18 @@ class FakeIdp:
     def __init__(self, realm: str = "uni"):
         self.tokens: dict[str, dict] = {}
         self.introspected: list[str] = []
+        self.userinfo_asked: list[str] = []
         idp = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
 
-            def _json(self, code: int, body: dict) -> None:
+            def _json(self, code: int, body: dict, headers: dict | None = None) -> None:
                 data = json.dumps(body).encode()
                 self.send_response(code)
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -57,7 +66,25 @@ class FakeIdp:
                         "issuer": idp.issuer,
                         "introspection_endpoint":
                             f"{idp.issuer}/protocol/openid-connect/token/introspect",
+                        "userinfo_endpoint":
+                            f"{idp.issuer}/protocol/openid-connect/userinfo",
                     })
+                if self.path == f"/realms/{realm}/protocol/openid-connect/userinfo":
+                    scheme, _, token = (self.headers.get("Authorization") or "").partition(" ")
+                    idp.userinfo_asked.append(token)
+                    claims = idp.tokens.get(token, {}) if scheme == "Bearer" else {}
+                    if (claims.get("active") is not True or claims.get("typ") != "Bearer"
+                            or claims.get("exp", 0) <= time.time()):
+                        return self._json(401, {"error": "invalid_token",
+                                                "error_description": "Token verification failed"},
+                                          {"WWW-Authenticate":
+                                           f'Bearer realm="{realm}", error="invalid_token"'})
+                    if "openid" not in str(claims.get("scope", "")).split():
+                        return self._json(403, {"error": "insufficient_scope",
+                                                "error_description": "Missing openid scope"})
+                    profile = ("sub", "email_verified", "name", "preferred_username",
+                               "given_name", "family_name", "email")
+                    return self._json(200, {k: claims[k] for k in profile if k in claims})
                 return self._json(404, {"error": "not found"})
 
             def do_POST(self):  # noqa: N802
@@ -101,7 +128,14 @@ class FakeIdp:
         claims.update(overrides)
         for key in drop:
             claims.pop(key, None)
-        token = jwt_for(self.issuer, jti=claims["jti"])
+        # The payload is what the token itself says. Introspection adds
+        # `active`, `client_id`, `username` and `token_type`; the token never
+        # carries them. `iss` stays this provider's, so a token is always routed
+        # here even when a test makes introspection report another issuer.
+        payload = {k: v for k, v in claims.items()
+                   if k not in ("active", "client_id", "username", "token_type")}
+        payload["iss"] = self.issuer
+        token = jwt_for(self.issuer, **payload)
         self.tokens[token] = claims
         return token
 

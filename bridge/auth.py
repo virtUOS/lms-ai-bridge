@@ -10,12 +10,14 @@ Two kinds of caller, told apart by the bearer token alone:
   the logged-in user's Keycloak token as `Bearer
   {{LIBRECHAT_OPENID_ACCESS_TOKEN}}`; another host that exchanges its user's
   login token would send the same kind of token from its own realm. The bridge asks
-  the issuing identity provider whether the token is active and meant for the
-  bridge (RFC 7662 token introspection), and learns the username from the
-  answer.
+  the issuing identity provider whether the token is genuine, and learns the
+  username. With a client of its own there, it asks by token introspection
+  (RFC 7662) and also checks the token was meant for the bridge; without one,
+  it falls back to the userinfo endpoint, which cannot show that — see
+  `OidcIssuer` for the two modes and why introspection is the one to aim for.
 
-Introspection rather than checking the JWT signature locally, because the
-standard library cannot verify RS256 and this component depends on nothing
+Asking the provider rather than checking the JWT signature locally, because
+the standard library cannot verify RS256 and this component depends on nothing
 else. It costs one round trip to the identity provider per request, and buys
 revocation for free: a user who logs out of Keycloak is refused on their next
 call, not when a cached key or token expires.
@@ -61,49 +63,77 @@ class IdentityProviderError(RuntimeError):
     in again, which fixes nothing."""
 
 
-def _unverified_issuer(token: str) -> str:
+def _unverified_claims(token: str) -> dict:
     parts = token.split(".")
     if len(parts) != 3:
-        return ""
+        return {}
     try:
         payload = parts[1] + "=" * (-len(parts[1]) % 4)
         claims = json.loads(base64.urlsafe_b64decode(payload))
     except (ValueError, TypeError):
-        return ""
-    iss = claims.get("iss") if isinstance(claims, dict) else None
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def _unverified_issuer(token: str) -> str:
+    iss = _unverified_claims(token).get("iss")
     return iss.rstrip("/") if isinstance(iss, str) else ""
 
 
 class OidcIssuer:
     """One identity provider whose users' tokens the bridge accepts.
 
-    `client_id`/`client_secret` are the bridge's own confidential client at
-    that provider, used only to call introspection. `audience` is what must
-    appear in a token's `aud` — in Keycloak, an audience mapper on the calling
-    application's client adds it. `allowed_clients` restricts which
-    applications' tokens are accepted (`azp`); empty accepts any application
-    whose tokens name the bridge as audience.
+    Two modes, chosen by whether the bridge has its own client there:
+
+    - **introspection** (recommended): `client_id`/`client_secret` are the
+      bridge's own confidential client, used only to call introspection. The
+      token must name `audience` in its `aud` — in Keycloak, an audience mapper
+      on the calling application's client adds it. That is the check the MCP
+      authorisation spec asks for: a token issued *for this server*.
+    - **userinfo** (no client): the provider's userinfo endpoint accepts the
+      token only if the provider issued it and it is still live, so after a 200
+      the token's own claims can be believed. It cannot show that the token was
+      meant for the bridge, so it accepts any genuine token from the
+      applications in `allowed_clients` — which is therefore required. **Not
+      what the MCP spec asks for**; a stopgap for when the provider's
+      administrators have not created a client for the bridge yet.
+
+    `allowed_clients` restricts which applications' tokens are accepted
+    (`azp`). In introspection mode, empty accepts any application whose tokens
+    name the bridge as audience.
     """
 
-    def __init__(self, issuer: str, client_id: str, client_secret: str, *,
+    def __init__(self, issuer: str, client_id: str = "", client_secret: str = "", *,
                  audience: str = "", allowed_clients: tuple[str, ...] = (),
                  username_claim: str = "preferred_username", timeout: float = 10.0):
+        if bool(client_id) != bool(client_secret):
+            raise ValueError("the bridge's client needs both an id and a secret "
+                             "(or neither, for userinfo mode)")
         self.issuer = issuer.rstrip("/")
         self.client_id = client_id
         self.client_secret = client_secret
+        self.mode = "introspection" if client_id else "userinfo"
         self.audience = audience or client_id
         self.allowed_clients = tuple(allowed_clients)
+        if self.mode == "userinfo" and not self.allowed_clients:
+            raise ValueError("userinfo mode checks no audience, so it needs the allowed "
+                             "clients (BRIDGE_OIDC_ALLOWED_CLIENTS); otherwise every "
+                             "application's tokens in the realm would be accepted")
         self.username_claim = username_claim
         self.timeout = timeout
-        self._introspection_endpoint = ""
+        self._endpoints: dict[str, str] = {}
 
-    def _fetch(self, req: urllib.request.Request) -> dict:
+    def _fetch(self, req: urllib.request.Request, refusals: tuple[int, ...] = ()) -> dict | None:
+        """The provider's JSON answer, or None if it answered with one of
+        `refusals` — its way of saying "not a token I vouch for"."""
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 body = json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:200]
             e.close()
+            if e.code in refusals:
+                return None
             raise IdentityProviderError(
                 f"{self.issuer} answered {e.code} to {req.full_url}: {detail}") from e
         except (urllib.error.URLError, OSError, ValueError) as e:
@@ -112,34 +142,49 @@ class OidcIssuer:
             raise IdentityProviderError(f"{self.issuer} sent a non-object from {req.full_url}")
         return body
 
-    def _endpoint(self) -> str:
+    def _endpoint(self, name: str) -> str:
         # From discovery, once, rather than configured: the path differs between
         # providers (and between Keycloak versions), and discovery is the one
         # place that states it.
-        if not self._introspection_endpoint:
+        if name not in self._endpoints:
             doc = self._fetch(urllib.request.Request(
                 f"{self.issuer}/.well-known/openid-configuration"))
-            endpoint = doc.get("introspection_endpoint")
+            endpoint = doc.get(name)
             if not isinstance(endpoint, str) or not endpoint:
-                raise IdentityProviderError(f"{self.issuer} advertises no introspection endpoint")
-            self._introspection_endpoint = endpoint
-        return self._introspection_endpoint
+                raise IdentityProviderError(f"{self.issuer} advertises no {name}")
+            self._endpoints[name] = endpoint
+        return self._endpoints[name]
 
     def verify(self, token: str) -> Caller | None:
         """The user this token belongs to, or None if the bridge must refuse it."""
-        credentials = base64.b64encode(
-            f"{self.client_id}:{self.client_secret}".encode("utf-8")).decode("ascii")
-        claims = self._fetch(urllib.request.Request(
-            self._endpoint(),
-            data=urllib.parse.urlencode(
-                {"token": token, "token_type_hint": "access_token"}).encode("ascii"),
-            headers={"Authorization": f"Basic {credentials}",
-                     "Content-Type": "application/x-www-form-urlencoded",
-                     "Accept": "application/json"},
-        ))
+        if self.mode == "introspection":
+            credentials = base64.b64encode(
+                f"{self.client_id}:{self.client_secret}".encode("utf-8")).decode("ascii")
+            claims = self._fetch(urllib.request.Request(
+                self._endpoint("introspection_endpoint"),
+                data=urllib.parse.urlencode(
+                    {"token": token, "token_type_hint": "access_token"}).encode("ascii"),
+                headers={"Authorization": f"Basic {credentials}",
+                         "Content-Type": "application/x-www-form-urlencoded",
+                         "Accept": "application/json"},
+            ))
+            if claims.get("active") is not True:
+                return None
+        else:
+            # 401: expired, revoked or not an access token. 403: an access token
+            # without the `openid` scope. Either way, not one to accept.
+            answer = self._fetch(urllib.request.Request(
+                self._endpoint("userinfo_endpoint"),
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            ), refusals=(401, 403))
+            if answer is None:
+                return None
+            # The provider has just accepted this exact token, so what it says
+            # about itself is now worth reading.
+            claims = _unverified_claims(token)
+        return self._accept(claims)
 
-        if claims.get("active") is not True:
-            return None
+    def _accept(self, claims: dict) -> Caller | None:
         if str(claims.get("iss") or "").rstrip("/") != self.issuer:
             return None
         # Keycloak introspects ID and refresh tokens too, and reports them as
@@ -147,10 +192,11 @@ class OidcIssuer:
         for key in ("typ", "token_type"):
             if key in claims and str(claims[key]).lower() != "bearer":
                 return None
-        aud = claims.get("aud")
-        audiences = [aud] if isinstance(aud, str) else list(aud or [])
-        if self.audience not in audiences:
-            return None
+        if self.mode == "introspection":
+            aud = claims.get("aud")
+            audiences = [aud] if isinstance(aud, str) else list(aud or [])
+            if self.audience not in audiences:
+                return None
         client = str(claims.get("azp") or "")
         if self.allowed_clients and client not in self.allowed_clients:
             return None
@@ -197,10 +243,6 @@ def issuers_from_env(env=os.environ) -> list[OidcIssuer]:
         return []
     client_id = env.get("BRIDGE_OIDC_CLIENT_ID", "").strip()
     client_secret = env.get("BRIDGE_OIDC_CLIENT_SECRET", "").strip()
-    if not client_id or not client_secret:
-        raise ValueError("BRIDGE_OIDC_ISSUER is set, so BRIDGE_OIDC_CLIENT_ID and "
-                         "BRIDGE_OIDC_CLIENT_SECRET are needed too (the bridge's own "
-                         "client, for token introspection)")
     allowed = tuple(c.strip() for c in env.get("BRIDGE_OIDC_ALLOWED_CLIENTS", "").split(",")
                     if c.strip())
     return [OidcIssuer(
