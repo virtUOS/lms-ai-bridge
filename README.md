@@ -332,6 +332,22 @@ tests/                        contract and retrieval tests
   retention and deletion of that copy are live questions. `/v1/forget` exists
   because of that, but no DSFA has been done.
 
+## Intended purpose
+
+**What it is for.** Study support. The bridge gets a course's own material to an
+AI assistant, so that students and teachers can ask questions about that course
+and get answers that cite their source — which document, which page or slide.
+Typical uses: explaining a concept from the lecture, revision, finding where a
+topic is covered.
+
+**What it is not for.** It is not intended, designed or tested for any use in
+which its output feeds a decision about a person. In particular, not for:
+
+- admitting students, or assigning them to institutions, programmes or courses;
+- grading, or producing grade suggestions for exams and coursework;
+- assessing what level of education someone should receive;
+- monitoring students or detecting cheating during exams.
+
 ## Licence
 
 [GPLv3](LICENSE). Chosen to match the ecosystem this is meant to work with —
