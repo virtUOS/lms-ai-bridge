@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bridge import mcp_server  # noqa: E402
-from bridge.auth import Caller, CoursePolicy  # noqa: E402
+from bridge.auth import Caller, CoursePolicy, parse_allowlist, policy_from_env  # noqa: E402
 from test_mcp_server import FakeRetrieval  # noqa: E402
 
 USER = Caller(kind="user", username="student1",
@@ -93,6 +93,63 @@ class TestUserAccess(unittest.TestCase):
         with self.assertRaises(ValueError):
             CoursePolicy("members")
 
+
+class TestAllowlistPolicy(unittest.TestCase):
+    """`allowlist`: the operator names, per user, the courses that user may search.
+
+    A stand-in for the membership check against the LMS, which does not exist
+    yet: explicit, fail-closed for everyone unlisted, and nothing more.
+    """
+
+    def test_an_allowlisted_user_sees_only_their_courses(self):
+        policy = CoursePolicy("allowlist", allowlist={"student1": {"ilias:86"}})
+        provider = FakeRetrieval()
+        _, listing = tool(provider, "list_indexed_courses", {}, user=USER, may_see=policy)
+        self.assertEqual([c["course_ref"] for c in listing["courses"]], ["ilias:86"])
+        is_error, _ = tool(provider, "search_course",
+                           {"course_ref": "moodle:5", "query": "Monade"}, user=USER, may_see=policy)
+        self.assertTrue(is_error)
+
+    def test_a_user_not_on_the_list_sees_nothing(self):
+        policy = CoursePolicy("allowlist", allowlist={"student1": {"ilias:86"}})
+        stranger = Caller(kind="user", username="student2", issuer=USER.issuer, client=USER.client)
+        _, listing = tool(FakeRetrieval(), "list_indexed_courses", {}, user=stranger, may_see=policy)
+        self.assertEqual(listing["courses"], [])
+
+    def test_usernames_match_regardless_of_case(self):
+        """Keycloak lowercases usernames; a hand-written list may not."""
+        policy = CoursePolicy("allowlist", allowlist=parse_allowlist("Student1=ilias:86"))
+        self.assertTrue(policy(USER, "ilias:86"))
+
+    def test_the_allowlist_is_parsed_from_its_environment_form(self):
+        parsed = parse_allowlist("student1=ilias:86, moodle:5; tutor = studip:abc;")
+        self.assertEqual(parsed, {"student1": frozenset({"ilias:86", "moodle:5"}),
+                                  "tutor": frozenset({"studip:abc"})})
+
+    def test_a_malformed_or_empty_allowlist_is_refused(self):
+        """A typo must stop the server, not silently hide every course."""
+        with self.assertRaises(ValueError):
+            parse_allowlist("student1")
+        with self.assertRaises(ValueError):
+            parse_allowlist("student1=")
+        with self.assertRaises(ValueError):
+            CoursePolicy("allowlist")
+        with self.assertRaises(ValueError):
+            CoursePolicy("allowlist", allowlist={})
+
+    def test_the_policy_comes_from_the_environment(self):
+        policy = policy_from_env({"BRIDGE_USER_COURSES": "allowlist",
+                                  "BRIDGE_USER_COURSE_ALLOWLIST": "student1=ilias:86"})
+        self.assertEqual(policy.mode, "allowlist")
+        self.assertTrue(policy(USER, "ilias:86"))
+        self.assertFalse(policy(USER, "moodle:5"))
+        self.assertEqual(policy_from_env({}).mode, "none")
+        with self.assertRaises(ValueError):
+            policy_from_env({"BRIDGE_USER_COURSES": "allowlist"})
+
+    def test_all_and_none_ignore_the_allowlist(self):
+        self.assertTrue(CoursePolicy("all", allowlist={"x": {"ilias:86"}})(USER, "moodle:5"))
+        self.assertFalse(CoursePolicy("none", allowlist={"student1": {"ilias:86"}})(USER, "ilias:86"))
 
 if __name__ == "__main__":
     unittest.main()

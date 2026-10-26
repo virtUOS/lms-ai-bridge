@@ -253,27 +253,69 @@ def issuers_from_env(env=os.environ) -> list[OidcIssuer]:
     )]
 
 
+def parse_allowlist(text: str) -> dict[str, frozenset[str]]:
+    """`user=course_ref,course_ref;user=course_ref` → {user: {course_refs}}.
+
+    Usernames are lowercased: Keycloak reports them that way, a hand-written
+    list may not. An entry without a user, a `=` or a course is an error —
+    a typo must stop the server, not silently hide every course.
+    """
+    out: dict[str, set[str]] = {}
+    for entry in (text or "").split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        user, sep, refs = entry.partition("=")
+        user = user.strip().lower()
+        courses = {r.strip() for r in refs.split(",") if r.strip()}
+        if not sep or not user or not courses:
+            raise ValueError(f"BRIDGE_USER_COURSE_ALLOWLIST entry {entry!r}: "
+                             "expected user=course_ref,course_ref")
+        out.setdefault(user, set()).update(courses)
+    return {user: frozenset(courses) for user, courses in out.items()}
+
+
 class CoursePolicy:
     """Which indexed courses a user caller may search.
 
     `none` (the default) hides every course: an authenticated user sees an
     empty index. `all` shows every indexed course to every authenticated user —
     for testing the login path end to end, never for real course material,
-    which is licensed to a course's members and nobody else.
+    which is licensed to a course's members and nobody else. `allowlist` lets
+    the operator name, per user, the courses that user may search; everyone
+    unlisted sees nothing.
 
     The real answer is per user: "is this user a member of this course", asked
     of the LMS through the bridge's read-only service account. Which Stud.IP
     route can answer that for a non-root account is not known yet (2026-09-29),
-    so that mode does not exist yet, and nothing here pretends it does.
+    so that mode does not exist yet, and nothing here pretends it does. The
+    allowlist is the operator's stand-in for it — explicit, and fail-closed.
     """
 
-    MODES = ("none", "all")
+    MODES = ("none", "all", "allowlist")
 
-    def __init__(self, mode: str = "none"):
+    def __init__(self, mode: str = "none", allowlist: dict | None = None):
         mode = (mode or "none").strip().lower()
         if mode not in self.MODES:
             raise ValueError(f"BRIDGE_USER_COURSES={mode!r}: one of {', '.join(self.MODES)}")
+        if mode == "allowlist" and not allowlist:
+            raise ValueError("BRIDGE_USER_COURSES=allowlist needs BRIDGE_USER_COURSE_ALLOWLIST "
+                             "(user=course_ref,course_ref;user=course_ref)")
         self.mode = mode
+        self.allowlist = {user.strip().lower(): frozenset(courses)
+                          for user, courses in (allowlist or {}).items()}
 
     def __call__(self, user: Caller, course_ref: str) -> bool:
-        return self.mode == "all"
+        if self.mode == "all":
+            return True
+        if self.mode == "allowlist":
+            return course_ref in self.allowlist.get(user.username.strip().lower(), ())
+        return False
+
+
+def policy_from_env(env=os.environ) -> CoursePolicy:
+    mode = env.get("BRIDGE_USER_COURSES", "none")
+    allowlist = None
+    if (mode or "").strip().lower() == "allowlist":
+        allowlist = parse_allowlist(env.get("BRIDGE_USER_COURSE_ALLOWLIST", ""))
+    return CoursePolicy(mode, allowlist=allowlist)

@@ -22,7 +22,8 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .auth import CoursePolicy, IdentityProviderError, authenticate, issuers_from_env
+from .auth import (CoursePolicy, IdentityProviderError, authenticate, issuers_from_env,
+                   policy_from_env)
 from .contract import (
     CONTRACT_VERSION,
     ChatRequest,
@@ -147,11 +148,16 @@ class Handler(BaseHTTPRequestHandler):
     # Interval between keepalive comments on the MCP GET stream. A class
     # attribute so tests can shorten it.
     mcp_keepalive_seconds = 15.0
+    # Who the current request's token belongs to, for the access log: an
+    # operator can see which user asked. Set by _caller(), cleared once logged.
+    caller_label = ""
 
     # -- plumbing --
 
     def log_message(self, fmt, *args):  # quieter, and to stderr
-        sys.stderr.write(f"  {self.address_string()} {fmt % args}\n")
+        who = f" {self.caller_label}" if self.caller_label else ""
+        self.caller_label = ""
+        sys.stderr.write(f"  {self.address_string()}{who} {fmt % args}\n")
 
     def _send(self, code: int, payload: dict, headers: dict | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -195,6 +201,8 @@ class Handler(BaseHTTPRequestHandler):
         if caller is None:
             self._error(401, "missing or invalid bearer token",
                         {"WWW-Authenticate": 'Bearer realm="lms-ai-bridge"'})
+        elif caller.kind == "user":
+            self.caller_label = f"user={caller.username}"
         return caller
 
     def _read_json(self) -> dict:
@@ -535,7 +543,7 @@ def main() -> int:
         max_workers=int(os.environ.get("ASR_MAX_CONCURRENT", "2")))
     Handler.auth_token = os.environ.get("BRIDGE_TOKEN", "")
     Handler.identity_issuers = issuers_from_env()
-    Handler.course_policy = CoursePolicy(os.environ.get("BRIDGE_USER_COURSES", "none"))
+    Handler.course_policy = policy_from_env()
 
     print(f"LMS AI Bridge {CONTRACT_VERSION}")
     print(f"  chat provider      : {chat.name}")
@@ -547,8 +555,10 @@ def main() -> int:
     for issuer in Handler.identity_issuers:
         checked = (f"introspection, audience {issuer.audience}" if issuer.mode == "introspection"
                    else f"userinfo, clients {', '.join(issuer.allowed_clients)}")
-        print(f"  per-user tokens    : {issuer.issuer} ({checked}), "
-              f"courses: {Handler.course_policy.mode}")
+        courses = Handler.course_policy.mode
+        if courses == "allowlist":
+            courses += f" ({len(Handler.course_policy.allowlist)} users)"
+        print(f"  per-user tokens    : {issuer.issuer} ({checked}), courses: {courses}")
         if issuer.mode == "userinfo":
             print("  WARNING: userinfo mode accepts any genuine token from the allowed clients; "
                   "it cannot check that a token was issued for this bridge, which the MCP "

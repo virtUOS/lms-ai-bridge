@@ -5,6 +5,8 @@ access token>` on every request to `/mcp`, with one forced token refresh and
 retry when the server answers 401. The static token keeps working for HAWKI.
 """
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -125,6 +127,21 @@ class TestUserTokensOverHttp(unittest.TestCase):
             self.assertEqual(r.readline(), b": keepalive\n")
         status, _ = self.request("/mcp", token, method="DELETE")
         self.assertEqual(status, 200)
+
+    def test_the_access_log_names_the_user_behind_a_token(self):
+        """An operator reading the log can see who asked; the service caller stays anonymous."""
+        for label, token, expected in (("user", self.idp.access_token(), "user=student1"),
+                                       ("service", self.static, "")):
+            with self.subTest(label):
+                captured = io.StringIO()
+                with contextlib.redirect_stderr(captured):
+                    self.request("/mcp", token, {"jsonrpc": "2.0", "id": 5, "method": "ping"})
+                lines = [ln for ln in captured.getvalue().splitlines() if '"POST /mcp' in ln]
+                self.assertEqual(len(lines), 1, captured.getvalue())
+                if expected:
+                    self.assertIn(expected, lines[0])
+                else:
+                    self.assertNotIn("user=", lines[0])
 
     def test_an_unreachable_idp_is_503_not_401(self):
         H = bridge_server.Handler

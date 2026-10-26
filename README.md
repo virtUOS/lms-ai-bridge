@@ -166,8 +166,10 @@ only `list_indexed_courses` and `search_course`, and the REST routes refuse
 them. The static `BRIDGE_TOKEN` keeps full access, unchanged. **Which courses a
 user may search is not solved yet:** knowing who the user is does not open the
 LMS as that user, and the per-user membership check is still to be built.
-Until then `BRIDGE_USER_COURSES` is `none` (a user sees nothing) or, for
-testing only, `all`.
+Until then `BRIDGE_USER_COURSES` is `none` (a user sees nothing), `allowlist`
+(the operator names, per user, the courses they may search — a stand-in for
+that check, fail-closed for everyone unlisted) or, for testing only, `all`.
+The access log names the user behind each per-user call.
 
 **`search_course` returns passages with citations and no answer.** The host's
 model writes the answer and cites the `citation` field; the tool adds a
