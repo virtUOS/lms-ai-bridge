@@ -30,6 +30,9 @@ class FakeRetrieval:
     def courses(self):
         return dict(self.store)
 
+    def course_names(self):
+        return {"ilias:86": "LernKI Testkurs", "moodle:5": "Generative KI"}
+
     def count(self, course_ref):
         return self.store.get(course_ref, 0)
 
@@ -125,6 +128,12 @@ class TestTools(unittest.TestCase):
             {c["course_ref"]: c["chunks"] for c in body["courses"]},
             {"ilias:86": 37, "moodle:5": 12},
         )
+
+    def test_list_indexed_courses_names_each_course(self):
+        """A course_ref is opaque; the host's model needs the name to talk about it."""
+        body = payload(run([call("list_indexed_courses", {})])[0])
+        self.assertEqual({c["course_ref"]: c["course_name"] for c in body["courses"]},
+                         {"ilias:86": "LernKI Testkurs", "moodle:5": "Generative KI"})
 
     def test_search_returns_passages_with_citation_fields_and_no_answer(self):
         reply = run([call("search_course", {"course_ref": "ilias:86", "query": "Tokenisierung"})])[0]

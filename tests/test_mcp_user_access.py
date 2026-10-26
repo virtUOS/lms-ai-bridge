@@ -56,6 +56,12 @@ class TestUserAccess(unittest.TestCase):
                            {"course_ref": "ilias:86", "query": "Monade"}, user=USER)
         self.assertTrue(is_error)
 
+    def test_a_user_sees_course_names_in_the_listing(self):
+        _, body = tool(FakeRetrieval(), "list_indexed_courses", {},
+                       user=USER, may_see=CoursePolicy("all"))
+        self.assertEqual([c["course_name"] for c in body["courses"]],
+                         ["LernKI Testkurs", "Generative KI"])
+
     def test_the_listing_and_search_follow_the_policy_per_course(self):
         only_moodle = lambda user, course_ref: course_ref == "moodle:5"  # noqa: E731
         provider = FakeRetrieval()

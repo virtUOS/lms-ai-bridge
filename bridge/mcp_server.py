@@ -73,7 +73,7 @@ TOOLS = [
     {
         "name": "list_indexed_courses",
         "description": (
-            "List the courses currently in the local index, with chunk counts and the "
+            "List the courses currently in the local index, with their names, chunk counts and the "
             "course_ref to use with search_course. Call this first."
         ),
         # No `properties` key at all: an empty {} round-trips through PHP
@@ -151,6 +151,13 @@ def _courses(provider) -> dict[str, int]:
     return {}
 
 
+def _course_names(provider) -> dict[str, str]:
+    names = getattr(provider, "course_names", None)
+    if callable(names):
+        return dict(names())
+    return {}
+
+
 def _fetch_documents(platform: str, course_id: str) -> tuple[str, list[dict]]:
     """Run the platform adapter in-process. Separate so tests can patch it."""
     adapters_dir = Path(__file__).resolve().parent.parent / "adapters"
@@ -181,10 +188,11 @@ def _citation(s) -> str:
 
 
 def tool_list_indexed_courses(provider, args: dict) -> dict:
+    names = _course_names(provider)
     return {
         "provider": provider.name,
         "courses": [
-            {"course_ref": ref, "chunks": n}
+            {"course_ref": ref, "course_name": names.get(ref, ""), "chunks": n}
             for ref, n in sorted(_courses(provider).items())
         ],
     }
@@ -287,6 +295,10 @@ class _UserView:
 
     def courses(self) -> dict[str, int]:
         return {ref: n for ref, n in _courses(self._provider).items() if self._visible(ref)}
+
+    def course_names(self) -> dict[str, str]:
+        return {ref: name for ref, name in _course_names(self._provider).items()
+                if self._visible(ref)}
 
     def count(self, course_ref: str) -> int:
         return self._provider.count(course_ref) if self._visible(course_ref) else 0

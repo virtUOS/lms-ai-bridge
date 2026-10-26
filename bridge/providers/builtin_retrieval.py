@@ -333,6 +333,14 @@ class BuiltinRetrieval(RetrievalProvider):
         with self._lock:
             return {ref: len(entries) for ref, entries in self._store.items()}
 
+    def course_names(self) -> dict[str, str]:
+        """course_ref -> the course's name as the documents carried it ("" if
+        none did). A course_ref is opaque; this is what a host's model can
+        call the course by before its first search."""
+        with self._lock:
+            return {ref: next((e.get("course_name", "") for e in entries if e.get("course_name")), "")
+                    for ref, entries in self._store.items()}
+
     def count(self, course_ref: str) -> int:
         """How many chunks are stored for a course. 0 means not indexed."""
         with self._lock:
