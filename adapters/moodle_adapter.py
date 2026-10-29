@@ -176,7 +176,10 @@ def _file_documents(course_id: int, mod: dict, course_name: str = "",
                 continue
             docs.append(
                 {
-                    "activity_ref": f"moodle:{course_id}:file:{mod.get('id')}:{name}",
+                    # The module type rides along: Moodle's link to a file
+                    # goes through mod/<type>/view.php (bridge/documents.py).
+                    "activity_ref": f"moodle:{course_id}:file:{mod.get('id')}:"
+                                    f"{mod.get('modname') or 'resource'}:{name}",
                     "title": name,
                     "locator": locator,
                     "text": body,
@@ -259,7 +262,8 @@ def fetch_course_documents(course_id: int) -> tuple[str, list[dict]]:
             if description:
                 docs.append(
                     {
-                        "activity_ref": f"moodle:{course_id}:module:{mod.get('id')}",
+                        "activity_ref": f"moodle:{course_id}:module:{mod.get('id')}"
+                                        f":{mod.get('modname') or ''}",
                         "title": strip_html(mod.get("name", "")) or "Aktivität",
                         "text": description,
                     }

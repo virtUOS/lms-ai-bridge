@@ -88,6 +88,19 @@ class McpAppsTest(unittest.TestCase):
             self.assertEqual(lms_link("studip:abc:courseware:273929"),
                              "https://s.example/dispatch.php/course/courseware?cid=abc")
 
+    def test_moodle_links_open_the_file_at_the_page(self):
+        from bridge.documents import lms_link
+        with mock.patch.dict(os.environ, {"MOODLE_URL": "https://m.example"}):
+            self.assertEqual(lms_link("moodle:5:file:23:resource:A.pdf", "S. 12"),
+                             "https://m.example/mod/resource/view.php?id=23&redirect=1#page=12")
+            self.assertEqual(lms_link("moodle:5:file:31:folder:B.pdf", "S. 2"),
+                             "https://m.example/mod/folder/view.php?id=31")
+            self.assertEqual(lms_link("moodle:5:module:40:page"),
+                             "https://m.example/mod/page/view.php?id=40")
+            # indexed before the module type was kept
+            self.assertEqual(lms_link("moodle:5:file:23:A.pdf"),
+                             "https://m.example/course/view.php?id=5#module-23")
+
     def test_search_only_selected_documents(self):
         only = mcp_server.doc_id("studip:abc:file:f2")
         res = call({"method": "tools/call", "params": {"name": "search_course", "arguments": {

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from urllib.parse import quote
 
 
@@ -50,6 +51,10 @@ def group_documents(entries: list[dict]) -> list[dict]:
 
 def _base(env: str) -> str:
     return os.environ.get(env, "").rstrip("/")
+
+
+_MODNAME = re.compile(r"^[a-z_]+$")
+_PAGE = re.compile(r"^S\. (\d+)$")
 
 
 def lms_link(activity_ref: str, locator: str = "") -> str:
@@ -101,9 +106,19 @@ def lms_link(activity_ref: str, locator: str = "") -> str:
         base = _base("MOODLE_URL")
         if not base:
             return ""
+        modname = parts[4] if len(parts) > 4 and _MODNAME.match(parts[4]) else ""
+        if kind in ("file", "module") and item and modname == "resource":
+            # Checked in a browser on 2026-10-29: redirect=1 forwards to the
+            # file itself, which the browser opens, and a #page=N survives the
+            # redirect, so a PDF opens at the cited page.
+            m = _PAGE.match(locator or "")
+            return (f"{base}/mod/resource/view.php?id={quote(item)}&redirect=1"
+                    + (f"#page={m.group(1)}" if m else ""))
+        if kind in ("file", "module") and item and modname:
+            return f"{base}/mod/{modname}/view.php?id={quote(item)}"
         if kind in ("file", "module") and item:
-            # The course page, scrolled to the activity: works for any module
-            # type, which the ref does not record.
+            # Refs indexed before the module type was kept: the course page,
+            # scrolled to the activity.
             return f"{base}/course/view.php?id={quote(course)}#module-{quote(item)}"
         return f"{base}/course/view.php?id={quote(course)}"
 
