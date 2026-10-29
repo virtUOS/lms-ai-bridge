@@ -61,6 +61,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -158,8 +159,9 @@ TOOLS = [
                 "k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6},
                 "documents": {
                     "type": "array", "items": {"type": "string"},
-                    "description": "optional: search only these documents, by the doc_id "
-                                   "values the user selected (e.g. from the course view)",
+                    "description": "optional: search only these documents of the course — "
+                                   "their names exactly as the user gave them (file name or "
+                                   "chapter), or doc_id values",
                 },
             },
             "required": ["course_ref", "query"],
@@ -209,6 +211,33 @@ def _course_names(provider) -> dict[str, str]:
 def _documents(provider, course_ref: str) -> list[dict]:
     listing = getattr(provider, "documents", None)
     return list(listing(course_ref)) if callable(listing) else []
+
+
+# Locators that name a position inside a file; any other single locator names
+# the document itself (a Courseware chapter), as the course view shows it.
+_POSITIONAL = re.compile(r"^(S\. \d+|Folie \d+|\d+(:\d+)?:\d{2})$")
+
+
+def _resolve_documents(provider, course_ref: str, wanted: set[str]) -> set[str]:
+    """doc_ids for what the caller named: doc_ids, file names or chapter names,
+    ignoring case. A provider that cannot list documents gets the values as
+    they came (doc_ids)."""
+    docs = _documents(provider, course_ref)
+    if not docs:
+        return wanted
+    keys = {w.strip().casefold() for w in wanted}
+    found = set()
+    for d in docs:
+        names = {d["doc_id"], d.get("title", "")}
+        locs = d.get("locators") or []
+        if len(locs) == 1 and not _POSITIONAL.match(locs[0]):
+            names.add(locs[0])
+        if {n.strip().casefold() for n in names if n} & keys:
+            found.add(d["doc_id"])
+    if not found:
+        raise ToolError(f"none of the documents {sorted(wanted)} is in {course_ref}; "
+                        f"search without `documents`, or use the names as the user gave them")
+    return found
 
 
 def _fetch_documents(platform: str, course_id: str) -> tuple[str, list[dict]]:
@@ -302,6 +331,8 @@ def tool_search_course(provider, args: dict) -> dict:
     # citations) and useless here, where the host model IS the answerer. The
     # first live run returned page numbers with no text — 2026-09-22.
     only = {str(d) for d in (args.get("documents") or []) if d} or None
+    if only:
+        only = _resolve_documents(provider, course_ref, only)
     hits = provider.search(course_ref, str(args["query"]), k=max(1, min(k, 20)),
                            **({"documents": only} if only else {}))
     passages = []

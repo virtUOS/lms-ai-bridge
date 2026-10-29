@@ -73,8 +73,12 @@ def lms_link(activity_ref: str, locator: str = "") -> str:
         if kind == "file" and item:
             return f"{base}/dispatch.php/file/details/{quote(item)}?cid={quote(course)}"
         if kind == "courseware":
-            # The course's Courseware. A chapter link needs the unit id, which
-            # the index does not keep (unverified pattern, not attempted).
+            # A chapter, checked in a browser on 2026-10-29. Refs indexed
+            # before the unit id was kept get the course's Courseware instead.
+            unit = parts[4] if len(parts) > 4 else ""
+            if item and unit:
+                return (f"{base}/dispatch.php/course/courseware/courseware/{quote(unit)}"
+                        f"?cid={quote(course)}#/structural_element/{quote(item)}")
             return f"{base}/dispatch.php/course/courseware?cid={quote(course)}"
         return f"{base}/dispatch.php/course/overview?cid={quote(course)}"
 

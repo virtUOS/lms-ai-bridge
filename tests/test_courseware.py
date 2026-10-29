@@ -141,6 +141,17 @@ class TestCoursewareExtraction(unittest.TestCase):
         body = self.docs[1]["text"]
         self.assertLess(body.index("Willkommen"), body.index("Selbsttest"))
 
+    def test_chapters_follow_the_tree_and_carry_the_unit(self):
+        from adapters.studip_courseware import _reading_order
+        el = lambda i, pos, parent: {"id": i, "attributes": {"position": pos},
+                                     "relationships": {"parent": {"data": {"id": parent}}}}
+        # chapter 1 (pos 0) with two pages, chapter 2 (pos 1) with one; given shuffled
+        tree = [el("c2", 1, "R"), el("p1b", 1, "c1"), el("c1", 0, "R"), el("p2a", 0, "c2"),
+                el("p1a", 0, "c1")]
+        self.assertEqual([e["id"] for e in _reading_order(tree, "R")],
+                         ["c1", "p1a", "p1b", "c2", "p2a"])
+        self.assertTrue(all(d["activity_ref"].endswith(":13775") for d in self.docs))
+
     def test_a_course_without_courseware_is_not_an_error(self):
         def empty(path):
             raise RuntimeError("404")

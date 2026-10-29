@@ -92,11 +92,43 @@ def fetch_courseware(studip_get, strip_html, course_id: str) -> list[dict]:
         root_id = (rel.get("data") or {}).get("id")
         if not root_id:
             continue
-        docs.extend(_fetch_unit(studip_get, strip_html, course_id, root_id))
+        docs.extend(_fetch_unit(studip_get, strip_html, course_id, root_id,
+                                str(unit.get("id") or "")))
     return docs
 
 
-def _fetch_unit(studip_get, strip_html, course_id: str, root_id: str) -> list[dict]:
+def _reading_order(elements: list[dict], root_id: str) -> list[dict]:
+    """Chapters in the order a reader meets them: depth first from the root,
+    siblings by `position`. `position` counts within one parent, so sorting
+    the whole tree by it interleaved chapter 1's pages with chapter 2's.
+    Elements whose parent is not in the tree keep their place at the end."""
+    def parent(e):
+        return (((e.get("relationships") or {}).get("parent") or {}).get("data") or {}).get("id")
+
+    def pos(e):
+        return (int((e.get("attributes") or {}).get("position") or 0), str(e.get("id")))
+
+    children: dict[str, list[dict]] = {}
+    for e in elements:
+        children.setdefault(str(parent(e)), []).append(e)
+    ordered: list[dict] = []
+    seen: set[str] = set()
+
+    def walk(node_id: str) -> None:
+        for e in sorted(children.get(node_id, []), key=pos):
+            if e.get("id") in seen:
+                continue
+            seen.add(e.get("id"))
+            ordered.append(e)
+            walk(str(e.get("id")))
+
+    walk(str(root_id))
+    ordered.extend(sorted((e for e in elements if e.get("id") not in seen), key=pos))
+    return ordered
+
+
+def _fetch_unit(studip_get, strip_html, course_id: str, root_id: str,
+                unit_id: str = "") -> list[dict]:
     try:
         root = studip_get(f"/courseware-structural-elements/{root_id}")
     except RuntimeError:
@@ -109,9 +141,12 @@ def _fetch_unit(studip_get, strip_html, course_id: str, root_id: str) -> list[di
     # The module description is short but high value: it is the one place that
     # says what the module is *about*, which is what "Worum geht es?" needs.
     description = strip_html(_payload_text(root_attrs.get("payload")))
+    # The unit id rides along in the ref: Stud.IP's link to a chapter needs it
+    # (dispatch.php/course/courseware/courseware/<unit>#/structural_element/<id>).
+    unit = f":{unit_id}" if unit_id else ""
     if len(description) >= 40:
         docs.append({
-            "activity_ref": f"studip:{course_id}:courseware:{root_id}",
+            "activity_ref": f"studip:{course_id}:courseware:{root_id}{unit}",
             "title": module_title,
             "locator": "Überblick",
             "text": description,
@@ -125,9 +160,8 @@ def _fetch_unit(studip_get, strip_html, course_id: str, root_id: str) -> list[di
     except RuntimeError:
         return docs
 
-    elements = [e for e in (tree.get("data") or []) if e.get("id") != root_id]
-    elements.sort(key=lambda e: (
-        int((e.get("attributes") or {}).get("position") or 0), str(e.get("id"))))
+    elements = _reading_order(
+        [e for e in (tree.get("data") or []) if e.get("id") != root_id], root_id)
 
     for element in elements:
         attrs = element.get("attributes", {}) or {}
@@ -145,7 +179,7 @@ def _fetch_unit(studip_get, strip_html, course_id: str, root_id: str) -> list[di
 
         docs.append({
             "activity_ref":
-                f"studip:{course_id}:courseware:{element.get('id')}",
+                f"studip:{course_id}:courseware:{element.get('id')}{unit}",
             "title": module_title,
             # The chapter title, which is what a reader needs to find the place.
             "locator": title or f"Abschnitt {attrs.get('position', '')}".strip(),

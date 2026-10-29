@@ -68,6 +68,26 @@ class McpAppsTest(unittest.TestCase):
         self.assertEqual([c["course_ref"] for c in res["structuredContent"]["courses"]], ["studip:abc"])
         self.assertNotIn("moodle:5", res["content"][0]["text"])
 
+    def test_documents_by_name_as_the_view_sends_them(self):
+        res = call({"method": "tools/call", "params": {"name": "search_course", "arguments": {
+            "course_ref": "studip:abc", "query": "Monaden algebraische Struktur",
+            "documents": ["folien.PDF"]}}}, self.p, user="u")
+        self.assertIn("Folien.pdf", res["content"][0]["text"])
+        self.assertNotIn("Skript.pdf", res["content"][0]["text"])
+        bad = call({"method": "tools/call", "params": {"name": "search_course", "arguments": {
+            "course_ref": "studip:abc", "query": "Monaden", "documents": ["Nichtda.pdf"]}}},
+            self.p, user="u")
+        self.assertTrue(bad.get("isError"))
+
+    def test_courseware_chapter_link_needs_the_unit(self):
+        from bridge.documents import lms_link
+        with mock.patch.dict(os.environ, {"STUDIP_URL": "https://s.example"}):
+            self.assertEqual(lms_link("studip:abc:courseware:273929:13775"),
+                             "https://s.example/dispatch.php/course/courseware/courseware/13775"
+                             "?cid=abc#/structural_element/273929")
+            self.assertEqual(lms_link("studip:abc:courseware:273929"),
+                             "https://s.example/dispatch.php/course/courseware?cid=abc")
+
     def test_search_only_selected_documents(self):
         only = mcp_server.doc_id("studip:abc:file:f2")
         res = call({"method": "tools/call", "params": {"name": "search_course", "arguments": {

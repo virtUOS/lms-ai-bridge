@@ -425,14 +425,15 @@ def fetch_course_documents(course_id: str) -> tuple[str, list[dict]]:
     # four had Courseware and three of those had **no files at all**.
     docs.extend(fetch_courseware(studip_get, strip_html, course_id))
 
-    # 3. Description and subtitle.
-    for field in ("description", "sub-title"):
+    # 3. Description and subtitle, titled for a reader rather than by their
+    # API field names.
+    for field, label in (("description", "Beschreibung"), ("sub-title", "Untertitel")):
         text = strip_html(attrs.get(field, ""))
         if len(text) >= 40:
             docs.append(
                 {
                     "activity_ref": f"studip:{course_id}:{field}",
-                    "title": f"{title} — {field}",
+                    "title": f"{title} — {label}",
                     "text": text,
                 }
             )

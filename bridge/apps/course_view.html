@@ -300,13 +300,13 @@ function wireMaterials(c) {
     ev.preventDefault();
     const q = form.q.value.trim();
     if (!q) return;
+    // Plain words, no ids: the bridge resolves document names itself, and the
+    // agent knows the course by the name the listing gave it.
     const docs = (c.documents || []).filter((d) => sel.has(d.doc_id));
     const name = c.course_name || c.course_ref;
-    let text = `${q}\n\n(Kurs: ${name}. Suche mit search_course, course_ref="${c.course_ref}"`;
-    if (docs.length) {
-      text += `, documents=${JSON.stringify(docs.map((d) => d.doc_id))} — nur in: ${docs.map((d) => display(d).name).join("; ")}`;
-    }
-    text += ")";
+    const text = docs.length
+      ? `${q}\n\n(Nur aus diesen Dokumenten im Kurs „${name}“: ${docs.map((d) => display(d).name).join("; ")})`
+      : `${q}\n\n(Im Kurs „${name}“)`;
     form.querySelector("button").disabled = true;
     try { await sendMessage(text); form.q.value = ""; }
     catch (e) { flash("Frage wurde nicht gesendet: " + e.message); }
