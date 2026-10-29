@@ -554,3 +554,41 @@ class AsrRetryTest(unittest.TestCase):
         msg, n = self._call([reset, reset, reset])
         self.assertEqual(n, 3)
         self.assertIn("cannot reach ASR server", msg)
+
+
+class WhisperXApiTest(unittest.TestCase):
+    """whisperx-api-server: nested, aligned segments in seconds, with speakers."""
+
+    def test_segments_keep_speakers_and_seconds(self):
+        from bridge.providers.transcription import WhisperXApiTranscription
+        result = {"text": "x", "segments": {"segments": [
+            {"start": 0.0, "end": 2.5, "text": " Hallo.", "speaker": "SPEAKER_00"},
+            {"start": 2.5, "end": 166.2, "text": " Willkommen.", "speaker": "SPEAKER_01"},
+        ], "word_segments": []}}
+        chunks = WhisperXApiTranscription._segment(result)
+        self.assertEqual(chunks[0][0], "0:00")
+        self.assertIn("SPEAKER_00: Hallo.", chunks[0][1])
+        self.assertIn("SPEAKER_01: Willkommen.", chunks[0][1])
+
+    def test_selected_by_asr_backend_and_sends_the_extras(self):
+        import os
+        from unittest import mock
+        from bridge.providers import transcription as t
+        env = {"ASR_BACKEND": "whisperx-api", "ASR_URL": "https://asr.example", "ASR_MODEL": "",
+               "ASR_DIARIZE": "true", "TRANSCRIPTION_PROVIDER": "auto"}
+        with mock.patch.dict(os.environ, env):
+            provider = t.make_transcription()
+            self.assertIsInstance(provider, t.WhisperXApiTranscription)
+            sent = {}
+
+            def fake_call(req, timeout):
+                sent["url"], sent["body"] = req.full_url, req.data
+                return {"segments": [{"start": 1, "end": 2, "text": "a", "speaker": "S"}]}
+
+            with mock.patch.object(t, "_json_call", fake_call):
+                provider.transcribe(b"RIFF", "p.wav")
+        self.assertTrue(sent["url"].endswith("/v1/audio/transcriptions"))
+        for field in (b'name="diarize"\r\n\r\ntrue', b'name="align"\r\n\r\ntrue',
+                      b'name="response_format"\r\n\r\nverbose_json'):
+            self.assertIn(field, sent["body"])
+        self.assertNotIn(b'name="model"', sent["body"])

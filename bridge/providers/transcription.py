@@ -364,6 +364,68 @@ class OpenAICompatibleTranscription(TranscriptionProvider):
         return out
 
 
+class WhisperXApiTranscription(OpenAICompatibleTranscription):
+    """whisperx-api-server: the OpenAI route with WhisperX's extras.
+
+    Osnabrück replaced MurmurAI with this server on 2026-10-28
+    (whisperx-api-setup). It keeps `POST /v1/audio/transcriptions` but adds
+    `align`, `diarize` and speaker limits as form fields, so the bridge gets
+    speaker labels back over the common route. With `align`, the segments
+    arrive nested (`{"segments": {"segments": [...]}}`), in seconds, each with
+    an optional `speaker`. The request blocks; it runs on a job worker.
+    """
+
+    name = "whisperx-api-server"
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Unlike plain Whisper servers, this one has a configured default
+        # model; only override it when ASR_MODEL says so.
+        self.model = kwargs.get("model") or os.environ.get("ASR_MODEL", "")
+        self.diarize = os.environ.get("ASR_DIARIZE", "true").lower() in ("1", "true", "yes")
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url)
+
+    def transcribe(self, data: bytes, filename: str) -> list[tuple[str, str]]:
+        if not self.configured:
+            raise RuntimeError("ASR_URL is not set")
+        fields = {"response_format": "verbose_json", "align": "true",
+                  "suppress_numerals": "false", "diarize": str(self.diarize).lower()}
+        if self.model:
+            fields["model"] = self.model
+        if self.language and self.language != "auto":
+            fields["language"] = self.language
+
+        body, content_type = _multipart(fields, filename, data)
+        headers = {"Content-Type": content_type}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/audio/transcriptions",
+            data=body, headers=headers, method="POST",
+        )
+        minutes = max(1.0, len(data) / 1_000_000)
+        return self._segment(_json_call(req, timeout=int(max(1800, minutes * 60))))
+
+    @classmethod
+    def _segment(cls, result: dict) -> list[tuple[str, str]]:
+        segments = result.get("segments") or []
+        if isinstance(segments, dict):
+            segments = segments.get("segments") or []
+        # The same chunking and inline speaker labels as MurmurAI's utterances,
+        # which come in milliseconds.
+        utterances = [
+            {"start": int(round(float(s.get("start") or 0) * 1000)),
+             "end": int(round(float(s.get("end") or 0) * 1000)),
+             "text": s.get("text") or "", "speaker": s.get("speaker")}
+            for s in segments
+        ]
+        return WhisperXTranscription._segment({"utterances": utterances,
+                                               "text": result.get("text") or ""})
+
+
 class TranscriptionAppProvider(TranscriptionProvider):
     """The institution's transcription *application*, not the raw ASR server.
 
@@ -459,7 +521,9 @@ def make_transcription() -> TranscriptionProvider | None:
     server is a richer, job-based API, and `auto` detects it rather than
     guessing: it exposes `/v1/transcript`, which the OpenAI shape does not.
 
-    Set `ASR_BACKEND` explicitly (`openai`, `whisperx`, `app`) to skip detection.
+    Set `ASR_BACKEND` explicitly (`openai`, `whisperx-api`, `whisperx`, `app`)
+    to skip detection. `whisperx-api` is not detected: it looks like the OpenAI
+    shape from outside.
     """
     mode = os.environ.get("TRANSCRIPTION_PROVIDER", "auto").strip().lower()
     if mode in ("none", "off"):
@@ -473,6 +537,10 @@ def make_transcription() -> TranscriptionProvider | None:
             return app
         # Falls through: the app provider is a placeholder, and silently
         # serving nothing would be worse than using an ASR server directly.
+
+    if backend in ("whisperx-api", "whisperx-api-server"):
+        provider = WhisperXApiTranscription()
+        return provider if provider.configured else None
 
     if backend in ("whisperx", "murmurai"):
         provider = WhisperXTranscription()
