@@ -94,12 +94,14 @@ def lms_link(activity_ref: str, locator: str = "") -> str:
         client = os.environ.get("ILIAS_CLIENT", "")
         suffix = f"&client_id={quote(client)}" if client else ""
         if kind in ("file", "obj") and item:
-            # ILIAS's permanent link. `file_<ref>` opens the file's info page;
-            # checked 2026-10-29 only so far as ILIAS keeps the target through
-            # its login redirect. `obj` items have no type in the ref, so they
-            # get the course instead.
+            # ILIAS's permanent link. Checked logged in on 2026-10-29:
+            # `file_<ref>` serves the file itself (inline PDF), the target
+            # survives ILIAS's login, and a #page=N survives its redirects.
+            # `obj` items have no type in the ref, so they get the course.
             if kind == "file":
-                return f"{base}/goto.php?target=file_{quote(item)}{suffix}"
+                m = _PAGE.match(locator or "")
+                return (f"{base}/goto.php?target=file_{quote(item)}{suffix}"
+                        + (f"#page={m.group(1)}" if m else ""))
         return f"{base}/goto.php?target=crs_{quote(course)}{suffix}"
 
     if platform == "moodle":

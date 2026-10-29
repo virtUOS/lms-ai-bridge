@@ -97,6 +97,10 @@ class McpAppsTest(unittest.TestCase):
                              "https://m.example/mod/folder/view.php?id=31")
             self.assertEqual(lms_link("moodle:5:module:40:page"),
                              "https://m.example/mod/page/view.php?id=40")
+            # ILIAS: the file itself, at the cited page
+            with mock.patch.dict(os.environ, {"ILIAS_URL": "https://i.example", "ILIAS_CLIENT": "c"}):
+                self.assertEqual(lms_link("ilias:86:file:87:A.pdf", "S. 3"),
+                                 "https://i.example/goto.php?target=file_87&client_id=c#page=3")
             # indexed before the module type was kept
             self.assertEqual(lms_link("moodle:5:file:23:A.pdf"),
                              "https://m.example/course/view.php?id=5#module-23")
