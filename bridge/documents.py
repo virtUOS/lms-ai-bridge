@@ -1,8 +1,8 @@
 """The documents of an indexed course, and links back into their LMS.
 
-SPIKE (2026-10-29, branch spike/mcp-apps): written for the MCP Apps
-experiment — a course view that lists materials, and source cards that open
-the passage in the LMS. Throwaway until the experiment says otherwise.
+Used by the MCP App view (bridge/apps/course_view.html, BRIDGE_MCP_APPS):
+a course view that lists materials, and source cards that open the material
+in its LMS.
 
 A *document* is everything indexed under one `activity_ref`: a file's pages,
 a wiki page, an announcement. Its `doc_id` is a short hash of that ref, short
@@ -85,9 +85,10 @@ def lms_link(activity_ref: str, locator: str = "") -> str:
         client = os.environ.get("ILIAS_CLIENT", "")
         suffix = f"&client_id={quote(client)}" if client else ""
         if kind in ("file", "obj") and item:
-            # Unverified (spike): ILIAS's permanent link. `file_<ref>` opens the
-            # file's info page; `obj` items have no type in the ref, so they get
-            # the course instead.
+            # ILIAS's permanent link. `file_<ref>` opens the file's info page;
+            # checked 2026-10-29 only so far as ILIAS keeps the target through
+            # its login redirect. `obj` items have no type in the ref, so they
+            # get the course instead.
             if kind == "file":
                 return f"{base}/goto.php?target=file_{quote(item)}{suffix}"
         return f"{base}/goto.php?target=crs_{quote(course)}{suffix}"

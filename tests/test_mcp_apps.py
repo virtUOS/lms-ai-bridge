@@ -1,5 +1,5 @@
-"""SPIKE (2026-10-29): MCP Apps view. Minimal checks only: off by default (so
-HAWKI sees nothing new), and with BRIDGE_MCP_APPS the view is wired up."""
+"""MCP Apps view: off by default (so HAWKI sees nothing new), with
+BRIDGE_MCP_APPS the view is wired up, and its two filters work."""
 
 import os
 import sys

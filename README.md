@@ -142,8 +142,9 @@ whatever the institution already runs.
     claude mcp add lms-ai-bridge -- python3 /path/to/lms-ai-bridge/bridge/mcp_server.py
 
 `bridge/mcp_server.py` exposes the contract over MCP's stdio transport — stdlib
-only, no SDK — as four tools: `list_indexed_courses`, `index_course(platform,
-course_id)`, `search_course(course_ref, query)` and `forget_course`. Any MCP
+only, no SDK — as four tools: `list_indexed_courses(platform?)`,
+`index_course(platform, course_id)`, `search_course(course_ref, query,
+documents?)` and `forget_course`. Any MCP
 host works: Claude Code, Claude Desktop, an IDE. It reads `.env` for the LMS
 credentials and the embedding model, and shares the index file with the HTTP
 server, so a course indexed by `demo-ilias.sh` is immediately searchable.
@@ -176,6 +177,25 @@ model writes the answer and cites the `citation` field; the tool adds a
 `confidence` flag (`ok`, `low`, `none`) so a loosely related result is not
 mistaken for coverage. This keeps the bridge out of the generation business,
 which is the whole argument of this prototype.
+
+**Interactive views (MCP Apps, optional).** With `BRIDGE_MCP_APPS=true`,
+`list_indexed_courses` and `search_course` carry a `ui://` view
+(`bridge/apps/course_view.html`, one self-contained page) that a host
+supporting MCP Apps renders next to the tool call:
+
+- the course list as cards; a card opens the course's materials by folder, and
+  a student can tick documents and ask about just those (the view sends the
+  question with `ui/message`; `search_course` takes the documents' `doc_id`s);
+- the sources of an answer as cards with the passage, its page, slide or
+  timestamp, and a link into the LMS.
+
+The materials lists reach the view as `structuredContent`, which hosts do not
+pass to the model. Links go to the LMS's own pages, so the LMS decides who may
+open a file; the view declares the LMS origins from `STUDIP_URL`, `ILIAS_URL`
+and `MOODLE_URL` and opens nothing else. Off by default: hosts that never
+asked for views see the tools exactly as before. Tried with LibreChat
+v0.8.9-rc1 (`mcpSettings.apps: true`, `mcpAppSandbox.url` on a separate
+origin), which asks the user to approve each message a view sends.
 
 **Who this is for.** The MCP server runs *as the user*, with that user's own
 LMS credentials — so it can only extract what they may see, and per-user
@@ -308,6 +328,9 @@ EXTRACTION.md                 formats, locators, per-platform download quirks
 bridge/
   contract.py                 the deliverable: types + provider interfaces
   server.py                   HTTP service (stdlib only)
+  mcp_server.py               MCP tools, over stdio and at POST /mcp
+  documents.py                a course's documents, and links back into the LMS
+  apps/course_view.html       the MCP App view (BRIDGE_MCP_APPS)
   providers/
     openai_chat.py            any OpenAI-compatible endpoint, + offline echo
     builtin_retrieval.py      simple lexical retrieval, so the demo is honest

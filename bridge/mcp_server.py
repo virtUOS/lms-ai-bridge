@@ -43,6 +43,12 @@ bearer token for auth. That is the shape HAWKI's MCP client speaks and the
 simplest form of the streamable-HTTP transport. One handler, two transports,
 so they cannot drift apart.
 
+**Interactive views (MCP Apps, 2026-10-29), optional:** with BRIDGE_MCP_APPS
+set, `list_indexed_courses` and `search_course` point at one `ui://` page that
+a host such as LibreChat renders in a sandbox: course cards with their
+materials, and source cards that open the material in its LMS. The view gets
+its data as `structuredContent`, which hosts do not pass to the model.
+
 **Per-user over HTTP, first step (2026-09-29):** `/mcp` also accepts a user's
 own OIDC access token (bridge/auth.py), which LibreChat can forward per user.
 Such a caller gets the read tools only, over the courses a policy lets them
@@ -70,8 +76,9 @@ PLATFORMS = ("moodle", "studip", "ilias")
 # Cosine similarity below which a search result is flagged as loosely related.
 LOW_CONFIDENCE = float(os.environ.get("MCP_LOW_CONFIDENCE", "0.5"))
 
-# SPIKE (2026-10-29): MCP Apps. Off unless BRIDGE_MCP_APPS is set, so hosts
-# that never asked for interactive views (HAWKI) see exactly what they saw.
+# MCP Apps: an interactive view for list_indexed_courses and search_course.
+# Off unless BRIDGE_MCP_APPS is set, so hosts that never asked for interactive
+# views (HAWKI) see exactly what they saw.
 VIEW_URI = "ui://lms-ai-bridge/course-view.html"
 VIEW_MIME = "text/html;profile=mcp-app"
 VIEW_TOOLS = ("list_indexed_courses", "search_course")
@@ -249,7 +256,7 @@ def tool_list_indexed_courses(provider, args: dict) -> dict:
 
 
 def course_view_data(provider, args: dict) -> dict:
-    """What the course view draws (SPIKE, MCP Apps): every visible course with
+    """What the course view draws (MCP Apps): every visible course with
     its documents and links. For the view only, never the model's context — a
     course can carry a hundred documents."""
     out = tool_list_indexed_courses(provider, args)
