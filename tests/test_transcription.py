@@ -510,3 +510,47 @@ class TestModelAndDiarizationConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class AsrRetryTest(unittest.TestCase):
+    """A dropped connection is retried; the server's own error is not."""
+
+    def _call(self, effects):
+        import urllib.error  # noqa: F401  (urllib.request below)
+        from unittest import mock
+        from bridge.providers import transcription as t
+        calls = []
+
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"ok": true}'
+
+        def fake_urlopen(req, timeout):
+            calls.append(1)
+            effect = effects[len(calls) - 1]
+            if isinstance(effect, BaseException):
+                raise effect
+            return Resp()
+
+        req = t.urllib.request.Request("https://asr.example/x")
+        with mock.patch.object(t.urllib.request, "urlopen", fake_urlopen), \
+                mock.patch.object(t.time, "sleep", lambda s: None):
+            try:
+                return t._json_call(req, timeout=5), len(calls)
+            except RuntimeError as e:
+                return str(e), len(calls)
+
+    def test_a_reset_connection_is_retried(self):
+        import urllib.error
+        reset = urllib.error.URLError(ConnectionResetError(104, "reset"))
+        self.assertEqual(self._call([reset, ConnectionResetError(104, "reset"), None]),
+                         ({"ok": True}, 3))
+
+    def test_it_gives_up_after_three_attempts(self):
+        import urllib.error
+        reset = urllib.error.URLError(ConnectionResetError(104, "reset"))
+        msg, n = self._call([reset, reset, reset])
+        self.assertEqual(n, 3)
+        self.assertIn("cannot reach ASR server", msg)

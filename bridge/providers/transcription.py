@@ -417,15 +417,27 @@ def _multipart(fields: dict, filename: str, data: bytes) -> tuple[bytes, str]:
     return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
+# Pauses before retrying a request the network dropped. An 18 MB upload once
+# ended in "Connection reset by peer" while the server was fine (2026-10-29),
+# and the recording was simply missing from the course afterwards. An HTTP
+# error is the server's answer and is not retried.
+_RETRY_DELAYS = (5, 20)
+
+
 def _json_call(req: urllib.request.Request, timeout: int) -> dict:
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:300]
-        raise RuntimeError(f"ASR {e.code}: {detail}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"cannot reach ASR server: {e.reason}") from e
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:300]
+            raise RuntimeError(f"ASR {e.code}: {detail}") from e
+        except (urllib.error.URLError, ConnectionError) as e:
+            if attempt == len(_RETRY_DELAYS):
+                raise RuntimeError(
+                    f"cannot reach ASR server: {getattr(e, 'reason', e)}") from e
+            time.sleep(_RETRY_DELAYS[attempt])
+    raise AssertionError("unreachable")
 
 
 def _stamp(seconds: float) -> str:
