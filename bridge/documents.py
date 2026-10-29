@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 from urllib.parse import quote
 
 
@@ -53,23 +52,6 @@ def _base(env: str) -> str:
     return os.environ.get(env, "").rstrip("/")
 
 
-_PAGE = re.compile(r"^S\. (\d+)$")
-_TIME = re.compile(r"^(?:(\d+):)?(\d+):(\d{2})$")
-
-
-def _fragment(locator: str) -> str:
-    """`#page=N` for a PDF page, `#t=S` for a media timestamp: both understood
-    by browsers when the file itself is opened, ignored otherwise."""
-    m = _PAGE.match(locator or "")
-    if m:
-        return f"#page={m.group(1)}"
-    m = _TIME.match(locator or "")
-    if m:
-        h, mm, ss = int(m.group(1) or 0), int(m.group(2)), int(m.group(3))
-        return f"#t={h * 3600 + mm * 60 + ss}"
-    return ""
-
-
 def lms_link(activity_ref: str, locator: str = "") -> str:
     """A browser URL for the material behind `activity_ref`, or "" if the
     platform's base URL is not configured. Unverified formats are marked."""
@@ -84,10 +66,16 @@ def lms_link(activity_ref: str, locator: str = "") -> str:
         base = _base("STUDIP_URL")
         if not base:
             return ""
+        # Checked in a browser on 2026-10-29 (Stud.IP 6.1, logged in): the file
+        # page shows the file with Stud.IP's own preview or player. The
+        # download route (`sendfile.php`) downloads instead, so a page or
+        # timestamp in the URL is lost; the card shows the locator instead.
         if kind == "file" and item:
-            # The front end's download route, as Stud.IP's own `meta.download-url`
-            # names it; needs the browser's Stud.IP session, which is the point.
-            return f"{base}/sendfile.php?type=0&file_id={quote(item)}{_fragment(locator)}"
+            return f"{base}/dispatch.php/file/details/{quote(item)}?cid={quote(course)}"
+        if kind == "courseware":
+            # The course's Courseware. A chapter link needs the unit id, which
+            # the index does not keep (unverified pattern, not attempted).
+            return f"{base}/dispatch.php/course/courseware?cid={quote(course)}"
         return f"{base}/dispatch.php/course/overview?cid={quote(course)}"
 
     if platform == "ilias":

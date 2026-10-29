@@ -19,7 +19,7 @@
     --bg2: var(--color-background-secondary, #f5f6f8);
     --fg: var(--color-text-primary, #1d1f23);
     --fg2: var(--color-text-secondary, #5b6170);
-    --line: var(--color-border-primary, #dfe2e8);
+    --line: color-mix(in srgb, var(--fg) 16%, transparent);
     --accent: var(--color-text-info, #2457c5);
     --radius: var(--border-radius-md, 10px);
     --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
@@ -31,7 +31,7 @@
     --bg2: var(--color-background-secondary, #282b31);
     --fg: var(--color-text-primary, #eceef2);
     --fg2: var(--color-text-secondary, #a7adba);
-    --line: var(--color-border-primary, #3a3e46);
+    --line: color-mix(in srgb, var(--fg) 22%, transparent);
     --accent: var(--color-text-info, #8fb0ff);
     --studip: #7fb0ec; --ilias: #f0936b; --moodle: #f2b25c;
     --ok: #6fc394; --low: #e3b25a; --none: #ee8a8a;
@@ -237,11 +237,25 @@ function drawCourses() {
   if (open) wireMaterials(open);
 }
 
+const POSITIONAL = /^(S\. \d+|Folie \d+|\d+(:\d+)?:\d{2})$/;
+function display(d) {
+  const locs = d.locators || [];
+  if (locs.length === 1 && !POSITIONAL.test(locs[0]))
+    return { name: locs[0], group: d.folder || d.title };
+  return { name: d.title, group: d.folder || "" };
+}
+
+function selectionText(n) {
+  return n === 1 ? "Frage nur zu 1 ausgewähltem Dokument"
+       : n ? `Frage nur zu ${n} ausgewählten Dokumenten`
+       : "Frage zum ganzen Kurs — oder oben Dokumente auswählen";
+}
+
 function materials(c) {
   const sel = selected.get(c.course_ref) || new Set();
   const byFolder = new Map();
   for (const d of c.documents || []) {
-    const f = d.folder || "";
+    const f = display(d).group;
     if (!byFolder.has(f)) byFolder.set(f, []);
     byFolder.get(f).push(d);
   }
@@ -249,7 +263,7 @@ function materials(c) {
     (folder ? `<div class="folder">${esc(folder)}</div>` : "") + docs.map((d) => `
       <div class="doc">
         <input type="checkbox" id="d-${esc(d.doc_id)}" data-doc="${esc(d.doc_id)}" ${sel.has(d.doc_id) ? "checked" : ""}>
-        <label for="d-${esc(d.doc_id)}"><span class="t" title="${esc(d.title)}">${esc(d.title)}</span><span class="k">${esc(kindOf(d))}</span></label>
+        <label for="d-${esc(d.doc_id)}"><span class="t" title="${esc(display(d).name)}">${esc(display(d).name)}</span><span class="k">${esc(kindOf(d))}</span></label>
         ${d.link ? `<button class="linkbtn" data-link="${esc(d.link)}">Öffnen ↗</button>` : "<span></span>"}
       </div>`).join("")).join("");
   const n = sel.size;
@@ -259,7 +273,7 @@ function materials(c) {
       ${c.link ? `<button class="linkbtn" data-link="${esc(c.link)}">Kurs in ${esc(PLATFORM[platformOf(c.course_ref)] || "LMS")} öffnen ↗</button>` : ""}</header>
     <div class="list">${rows || `<p class="muted" style="padding:8px 12px">Kein Material im Index.</p>`}</div>
     <form class="ask">
-      <div class="scope">${n ? `Frage nur zu ${n} ausgewählten ${n === 1 ? "Dokument" : "Dokumenten"}` : "Frage zum ganzen Kurs — oder oben Dokumente auswählen"}</div>
+      <div class="scope">${selectionText(n)}</div>
       <input name="q" placeholder="${canAsk ? "Deine Frage …" : "Fragen aus der Ansicht unterstützt dieser Chat nicht"}" ${canAsk ? "" : "disabled"} autocomplete="off">
       <button class="primary" type="submit" ${canAsk ? "" : "disabled"}>Fragen</button>
     </form>
@@ -272,9 +286,7 @@ function wireMaterials(c) {
   $app.querySelectorAll("[data-doc]").forEach((cb) => cb.addEventListener("change", () => {
     cb.checked ? sel.add(cb.dataset.doc) : sel.delete(cb.dataset.doc);
     const scope = $app.querySelector(".ask .scope");
-    const n = sel.size;
-    scope.textContent = n ? `Frage nur zu ${n} ausgewählten ${n === 1 ? "Dokument" : "Dokumenten"}`
-                          : "Frage zum ganzen Kurs — oder oben Dokumente auswählen";
+    scope.textContent = selectionText(sel.size);
   }));
   wireLinks();
   const form = $app.querySelector(".ask");
@@ -286,7 +298,7 @@ function wireMaterials(c) {
     const name = c.course_name || c.course_ref;
     let text = `${q}\n\n(Kurs: ${name}. Suche mit search_course, course_ref="${c.course_ref}"`;
     if (docs.length) {
-      text += `, documents=${JSON.stringify(docs.map((d) => d.doc_id))} — nur in: ${docs.map((d) => d.title).join("; ")}`;
+      text += `, documents=${JSON.stringify(docs.map((d) => d.doc_id))} — nur in: ${docs.map((d) => display(d).name).join("; ")}`;
     }
     text += ")";
     form.querySelector("button").disabled = true;
@@ -304,13 +316,26 @@ function wireLinks() {
 }
 
 // sources view
+function mergePlaces(passages) {
+  const out = [], seen = new Map();
+  for (const p of passages) {
+    const key = (p.doc_id || p.activity_ref) + "|" + (p.locator || "");
+    if (seen.has(key)) { seen.get(key).text += " … " + (p.text || ""); continue; }
+    const copy = Object.assign({}, p);
+    seen.set(key, copy); out.push(copy);
+  }
+  return out;
+}
+
 function renderSources(data) {
-  const ps = data.passages || [];
+  const ps = mergePlaces(data.passages || []);
   const conf = data.confidence || (ps.length ? "ok" : "none");
   const confText = { ok: "passende Stellen", low: "nur lose passend", none: "nichts gefunden" }[conf] || conf;
-  const scope = data.documents && data.documents.length ? ` · nur ${data.documents.length} ausgewählte Dokumente` : "";
+  const nd = (data.documents || []).length;
+  const scope = nd === 1 ? " · nur 1 ausgewähltes Dokument" : nd ? ` · nur ${nd} ausgewählte Dokumente` : "";
   const cards = ps.map((p) => {
-    const full = String(p.text || "");
+    let full = String(p.text || "").trim();
+    if (/^[a-zäöüß.,;:)\]]/.test(full)) full = "… " + full;
     const short = full.length > 320 ? full.slice(0, 320).replace(/\s+\S*$/, "") + " …" : full;
     const where = [p.course_name, p.folder].filter(Boolean).join(" / ");
     return `<article class="src">

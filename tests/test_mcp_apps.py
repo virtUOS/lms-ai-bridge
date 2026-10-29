@@ -54,7 +54,8 @@ class McpAppsTest(unittest.TestCase):
         self.assertEqual(content["_meta"]["ui"]["csp"]["frameDomains"], ["https://studip.example"])
         course = res["structuredContent"]["courses"][0]
         self.assertEqual([d["title"] for d in course["documents"]], ["Skript.pdf", "Folien.pdf"])
-        self.assertTrue(course["documents"][0]["link"].startswith("https://studip.example/sendfile.php"))
+        self.assertEqual(course["documents"][0]["link"],
+                         "https://studip.example/dispatch.php/file/details/f1?cid=abc")
         # the model's text stays the short listing
         self.assertNotIn("documents", res["content"][0]["text"])
 
