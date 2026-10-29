@@ -102,12 +102,20 @@ TOOLS = [
         "name": "list_indexed_courses",
         "description": (
             "List the courses currently in the local index, with their names, chunk counts and the "
-            "course_ref to use with search_course. Call this first."
+            "course_ref to use with search_course. Call this first. Pass platform to list only "
+            "that learning platform's courses."
         ),
-        # No `properties` key at all: an empty {} round-trips through PHP
+        # A non-empty `properties` only: an empty {} round-trips through PHP
         # clients as [] (HAWKI's discovery log showed exactly that), and a
         # strict validator rejects a list where it wants an object.
-        "inputSchema": {"type": "object", "additionalProperties": False},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "platform": {"type": "string", "enum": list(PLATFORMS),
+                             "description": "optional: only this platform's courses"},
+            },
+            "additionalProperties": False,
+        },
     },
     {
         "name": "index_course",
@@ -227,20 +235,24 @@ def _citation(s) -> str:
 
 def tool_list_indexed_courses(provider, args: dict) -> dict:
     names = _course_names(provider)
+    platform = str(args.get("platform") or "").lower()
+    if platform and platform not in PLATFORMS:
+        raise ToolError(f"unknown platform {platform!r}; one of {', '.join(PLATFORMS)}")
     return {
         "provider": provider.name,
         "courses": [
             {"course_ref": ref, "course_name": names.get(ref, ""), "chunks": n}
             for ref, n in sorted(_courses(provider).items())
+            if not platform or ref.split(":", 1)[0] == platform
         ],
     }
 
 
-def course_view_data(provider) -> dict:
+def course_view_data(provider, args: dict) -> dict:
     """What the course view draws (SPIKE, MCP Apps): every visible course with
     its documents and links. For the view only, never the model's context — a
     course can carry a hundred documents."""
-    out = tool_list_indexed_courses(provider, {})
+    out = tool_list_indexed_courses(provider, args)
     for c in out["courses"]:
         c["link"] = lms_link(c["course_ref"])
         c["documents"] = [
@@ -448,7 +460,7 @@ def handle(msg: dict, provider, user=None, may_see=None) -> dict | None:
             payload = handler(provider, params.get("arguments") or {})
             out = _tool_result(payload)
             if apps and name == "list_indexed_courses":
-                out["structuredContent"] = course_view_data(provider)
+                out["structuredContent"] = course_view_data(provider, params.get("arguments") or {})
             elif apps and name == "search_course":
                 out["structuredContent"] = payload
             return _result(rid, out)

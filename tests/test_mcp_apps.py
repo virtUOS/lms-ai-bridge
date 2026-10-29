@@ -59,6 +59,15 @@ class McpAppsTest(unittest.TestCase):
         # the model's text stays the short listing
         self.assertNotIn("documents", res["content"][0]["text"])
 
+    def test_platform_filter_reaches_the_view(self):
+        self.p.index(IndexRequest(course_ref="moodle:5", documents=[
+            IndexDocument(activity_ref="moodle:5:course", title="KI", text="Kursbeschreibung Moodle")]))
+        with mock.patch.dict(os.environ, {"BRIDGE_MCP_APPS": "1"}):
+            res = call({"method": "tools/call", "params": {"name": "list_indexed_courses",
+                                                          "arguments": {"platform": "studip"}}}, self.p, user="u")
+        self.assertEqual([c["course_ref"] for c in res["structuredContent"]["courses"]], ["studip:abc"])
+        self.assertNotIn("moodle:5", res["content"][0]["text"])
+
     def test_search_only_selected_documents(self):
         only = mcp_server.doc_id("studip:abc:file:f2")
         res = call({"method": "tools/call", "params": {"name": "search_course", "arguments": {
