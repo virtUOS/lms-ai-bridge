@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kursmaterial</title>
+<!--
+  SPIKE (2026-10-29, branch spike/mcp-apps): the bridge's MCP App view.
+  One self-contained page for two tools: list_indexed_courses renders course
+  cards with their materials, search_course renders source cards. It talks to
+  the host only over postMessage (MCP Apps, JSON-RPC); it never calls the
+  bridge or an LMS itself. Links open through the host (ui/open-link), so the
+  LMS decides who may see a file.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: var(--color-background-primary, #ffffff);
+    --bg2: var(--color-background-secondary, #f5f6f8);
+    --fg: var(--color-text-primary, #1d1f23);
+    --fg2: var(--color-text-secondary, #5b6170);
+    --line: var(--color-border-primary, #dfe2e8);
+    --accent: var(--color-text-info, #2457c5);
+    --radius: var(--border-radius-md, 10px);
+    --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+    --studip: #2b6cb0; --ilias: #b4481c; --moodle: #c26a00;
+    --ok: #2f7d4f; --low: #a36a00; --none: #a33a3a;
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--color-background-primary, #1f2126);
+    --bg2: var(--color-background-secondary, #282b31);
+    --fg: var(--color-text-primary, #eceef2);
+    --fg2: var(--color-text-secondary, #a7adba);
+    --line: var(--color-border-primary, #3a3e46);
+    --accent: var(--color-text-info, #8fb0ff);
+    --studip: #7fb0ec; --ilias: #f0936b; --moodle: #f2b25c;
+    --ok: #6fc394; --low: #e3b25a; --none: #ee8a8a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { font: 14px/1.45 var(--font); color: var(--fg); padding: 4px 2px 8px; }
+  h2 { font-size: 15px; margin: 0 0 10px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  h2 .sub { font-weight: 400; color: var(--fg2); font-size: 13px; }
+  button { font: inherit; color: inherit; }
+  .muted { color: var(--fg2); }
+  .badge { font-size: 11px; font-weight: 600; letter-spacing: .02em; padding: 1px 7px; border-radius: 999px;
+           border: 1px solid currentColor; white-space: nowrap; }
+  .p-studip { color: var(--studip); } .p-ilias { color: var(--ilias); } .p-moodle { color: var(--moodle); }
+
+  /* course cards */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .card { text-align: left; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; min-height: 92px; }
+  .card:hover { border-color: var(--accent); }
+  .card[aria-expanded="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .card .name { font-weight: 600; line-height: 1.3; }
+  .card .meta { font-size: 12px; color: var(--fg2); margin-top: auto; }
+
+  /* materials */
+  .materials { margin-top: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); }
+  .materials header { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+                      padding: 8px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .materials header a, .linkbtn { color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer;
+                                  text-decoration: none; font-size: 13px; white-space: nowrap; }
+  .linkbtn:hover { text-decoration: underline; }
+  .list { max-height: 340px; overflow: auto; }
+  .folder { font-size: 12px; font-weight: 600; color: var(--fg2); padding: 8px 12px 2px; }
+  .doc { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 5px 12px; }
+  .doc:hover { background: var(--bg2); }
+  .doc label { display: flex; gap: 8px; align-items: baseline; cursor: pointer; min-width: 0; }
+  .doc .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .doc .k { font-size: 11px; color: var(--fg2); white-space: nowrap; }
+  .ask { display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  .ask .scope { width: 100%; font-size: 12px; color: var(--fg2); }
+  .ask input { flex: 1 1 220px; min-width: 0; font: inherit; color: var(--fg); background: var(--bg2);
+               border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+  .primary { background: var(--accent); color: var(--bg); border: 0; border-radius: 8px; padding: 7px 14px;
+             cursor: pointer; font-weight: 600; }
+  .primary:disabled { opacity: .5; cursor: default; }
+
+  /* source cards */
+  .sources { display: flex; flex-direction: column; gap: 8px; }
+  .src { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); padding: 10px 12px; }
+  .src .head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .src .title { font-weight: 600; }
+  .chip { font-size: 12px; background: var(--bg2); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; }
+  .src .where { font-size: 12px; color: var(--fg2); margin-top: 2px; }
+  .src blockquote { margin: 8px 0 6px; padding: 0 0 0 10px; border-left: 3px solid var(--line); color: var(--fg); }
+  .src .foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .conf { font-size: 12px; font-weight: 600; }
+  .conf.ok { color: var(--ok); } .conf.low { color: var(--low); } .conf.none { color: var(--none); }
+  .note { font-size: 13px; color: var(--fg2); margin: 0 0 8px; }
+  .err { color: var(--none); font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="app"><p class="muted">Lade …</p></div>
+<script>
+"use strict";
+// ---- MCP Apps over postMessage (JSON-RPC 2.0) -------------------------------
+const host = window.parent;
+let nextId = 1;
+const pending = new Map();
+let hostCaps = {};
+
+function send(msg) { host.postMessage(Object.assign({ jsonrpc: "2.0" }, msg), "*"); }
+function request(method, params) {
+  const id = nextId++;
+  send({ id, method, params });
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    setTimeout(() => { if (pending.delete(id)) reject(new Error(method + ": keine Antwort")); }, 120000);
+  });
+}
+function notify(method, params) { send({ method, params }); }
+
+window.addEventListener("message", (ev) => {
+  if (ev.source !== host) return;
+  const m = ev.data;
+  if (!m || m.jsonrpc !== "2.0") return;
+  if (m.id !== undefined && !m.method) {                       // a response
+    const p = pending.get(m.id);
+    if (!p) return;
+    pending.delete(m.id);
+    m.error ? p.reject(new Error(m.error.message || "Fehler")) : p.resolve(m.result);
+    return;
+  }
+  if (m.method === "ui/notifications/tool-result") onToolResult(m.params || {});
+  else if (m.method === "ui/notifications/tool-input") onToolInput(m.params || {});
+  else if (m.method === "ui/notifications/host-context-changed") applyContext(m.params || {});
+  else if (m.method === "ui/resource-teardown" && m.id !== undefined) send({ id: m.id, result: {} });
+  else if (m.id !== undefined) send({ id: m.id, error: { code: -32601, message: "not supported" } });
+});
+
+function applyContext(ctx) {
+  if (ctx.theme) document.documentElement.dataset.theme = ctx.theme;
+  const vars = ctx.styles && ctx.styles.variables;
+  if (vars) for (const [k, v] of Object.entries(vars)) if (v) document.documentElement.style.setProperty(k, v);
+}
+
+let lastHeight = 0;
+function reportSize() {
+  const h = Math.ceil(document.documentElement.getBoundingClientRect().height);
+  if (h && h !== lastHeight) {
+    lastHeight = h;
+    notify("ui/notifications/size-changed", { width: Math.ceil(document.documentElement.scrollWidth), height: h });
+  }
+}
+new ResizeObserver(reportSize).observe(document.documentElement);
+
+async function openLink(url) {
+  try {
+    const r = await request("ui/open-link", { url });
+    if (r && r.isError) flash("Der Chat hat den Link nicht geöffnet.");
+  } catch (e) { flash("Link konnte nicht geöffnet werden: " + e.message); }
+}
+async function sendMessage(text) {
+  const r = await request("ui/message", { role: "user", content: [{ type: "text", text }] });
+  if (r && r.isError) throw new Error("abgebrochen oder abgelehnt");
+  return r;
+}
+
+// ---- rendering ----------------------------------------------------------------
+const $app = document.getElementById("app");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const PLATFORM = { studip: "Stud.IP", ilias: "ILIAS", moodle: "Moodle" };
+const platformOf = (ref) => String(ref || "").split(":")[0];
+const badge = (ref) => {
+  const p = platformOf(ref);
+  return `<span class="badge p-${esc(p)}">${esc(PLATFORM[p] || p)}</span>`;
+};
+function flash(text) {
+  let el = document.getElementById("flash");
+  if (!el) { el = document.createElement("p"); el.id = "flash"; el.className = "err"; $app.prepend(el); }
+  el.textContent = text;
+}
+
+function kindOf(doc) {
+  const locs = doc.locators || [];
+  const pages = locs.filter((l) => /^S\. \d+$/.test(l)).length;
+  const slides = locs.filter((l) => /^Folie \d+$/.test(l)).length;
+  const times = locs.filter((l) => /^\d+(:\d+)?:\d{2}$/.test(l));
+  if (pages) return pages === 1 ? "1 Seite" : `${pages} Seiten`;
+  if (slides) return slides === 1 ? "1 Folie" : `${slides} Folien`;
+  if (times.length) return "Aufnahme";
+  return "";
+}
+
+function onToolInput(_params) { /* the result carries everything we draw */ }
+
+function onToolResult(result) {
+  let data = result.structuredContent;
+  if (!data) {
+    const text = (result.content || []).find((c) => c.type === "text");
+    try { data = text ? JSON.parse(text.text) : null; } catch (_) { data = null; }
+  }
+  if (result.isError || !data) {
+    $app.innerHTML = `<p class="err">${esc((data && data.error) || "Das Werkzeug hat einen Fehler gemeldet.")}</p>`;
+    return;
+  }
+  if (Array.isArray(data.courses)) renderCourses(data);
+  else if (Array.isArray(data.passages)) renderSources(data);
+  else $app.innerHTML = `<p class="muted">Nichts anzuzeigen.</p>`;
+}
+
+// courses view
+let courses = [];
+let openRef = null;
+const selected = new Map();   // course_ref -> Set(doc_id)
+
+function renderCourses(data) {
+  courses = data.courses || [];
+  if (!courses.length) {
+    $app.innerHTML = `<p class="muted">Für dich ist noch kein Kurs freigegeben.</p>`;
+    return;
+  }
+  drawCourses();
+}
+
+function drawCourses() {
+  const cards = courses.map((c) => {
+    const docs = (c.documents || []).length;
+    return `<button class="card" data-ref="${esc(c.course_ref)}" aria-expanded="${c.course_ref === openRef}">
+      <div>${badge(c.course_ref)}</div>
+      <div class="name">${esc(c.course_name || c.course_ref)}</div>
+      <div class="meta">${docs} ${docs === 1 ? "Dokument" : "Dokumente"} · ${c.chunks} Textabschnitte</div>
+    </button>`;
+  }).join("");
+  const open = courses.find((c) => c.course_ref === openRef);
+  $app.innerHTML = `<h2>Meine Kurse <span class="sub">${courses.length} ${courses.length === 1 ? "Kurs" : "Kurse"} · Karte anklicken für das Material</span></h2>
+    <div class="grid">${cards}</div>${open ? materials(open) : ""}`;
+  $app.querySelectorAll(".card").forEach((b) => b.addEventListener("click", () => {
+    openRef = openRef === b.dataset.ref ? null : b.dataset.ref;
+    drawCourses();
+  }));
+  if (open) wireMaterials(open);
+}
+
+function materials(c) {
+  const sel = selected.get(c.course_ref) || new Set();
+  const byFolder = new Map();
+  for (const d of c.documents || []) {
+    const f = d.folder || "";
+    if (!byFolder.has(f)) byFolder.set(f, []);
+    byFolder.get(f).push(d);
+  }
+  const rows = [...byFolder.entries()].map(([folder, docs]) =>
+    (folder ? `<div class="folder">${esc(folder)}</div>` : "") + docs.map((d) => `
+      <div class="doc">
+        <input type="checkbox" id="d-${esc(d.doc_id)}" data-doc="${esc(d.doc_id)}" ${sel.has(d.doc_id) ? "checked" : ""}>
+        <label for="d-${esc(d.doc_id)}"><span class="t" title="${esc(d.title)}">${esc(d.title)}</span><span class="k">${esc(kindOf(d))}</span></label>
+        ${d.link ? `<button class="linkbtn" data-link="${esc(d.link)}">Öffnen ↗</button>` : "<span></span>"}
+      </div>`).join("")).join("");
+  const n = sel.size;
+  const canAsk = !!hostCaps.message;
+  return `<section class="materials">
+    <header><strong>${esc(c.course_name || c.course_ref)}</strong>
+      ${c.link ? `<button class="linkbtn" data-link="${esc(c.link)}">Kurs in ${esc(PLATFORM[platformOf(c.course_ref)] || "LMS")} öffnen ↗</button>` : ""}</header>
+    <div class="list">${rows || `<p class="muted" style="padding:8px 12px">Kein Material im Index.</p>`}</div>
+    <form class="ask">
+      <div class="scope">${n ? `Frage nur zu ${n} ausgewählten ${n === 1 ? "Dokument" : "Dokumenten"}` : "Frage zum ganzen Kurs — oder oben Dokumente auswählen"}</div>
+      <input name="q" placeholder="${canAsk ? "Deine Frage …" : "Fragen aus der Ansicht unterstützt dieser Chat nicht"}" ${canAsk ? "" : "disabled"} autocomplete="off">
+      <button class="primary" type="submit" ${canAsk ? "" : "disabled"}>Fragen</button>
+    </form>
+  </section>`;
+}
+
+function wireMaterials(c) {
+  const sel = selected.get(c.course_ref) || new Set();
+  selected.set(c.course_ref, sel);
+  $app.querySelectorAll("[data-doc]").forEach((cb) => cb.addEventListener("change", () => {
+    cb.checked ? sel.add(cb.dataset.doc) : sel.delete(cb.dataset.doc);
+    const scope = $app.querySelector(".ask .scope");
+    const n = sel.size;
+    scope.textContent = n ? `Frage nur zu ${n} ausgewählten ${n === 1 ? "Dokument" : "Dokumenten"}`
+                          : "Frage zum ganzen Kurs — oder oben Dokumente auswählen";
+  }));
+  wireLinks();
+  const form = $app.querySelector(".ask");
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const q = form.q.value.trim();
+    if (!q) return;
+    const docs = (c.documents || []).filter((d) => sel.has(d.doc_id));
+    const name = c.course_name || c.course_ref;
+    let text = `${q}\n\n(Kurs: ${name}. Suche mit search_course, course_ref="${c.course_ref}"`;
+    if (docs.length) {
+      text += `, documents=${JSON.stringify(docs.map((d) => d.doc_id))} — nur in: ${docs.map((d) => d.title).join("; ")}`;
+    }
+    text += ")";
+    form.querySelector("button").disabled = true;
+    try { await sendMessage(text); form.q.value = ""; }
+    catch (e) { flash("Frage wurde nicht gesendet: " + e.message); }
+    finally { form.querySelector("button").disabled = false; }
+  });
+}
+
+function wireLinks() {
+  $app.querySelectorAll("[data-link]").forEach((b) => b.addEventListener("click", (ev) => {
+    ev.preventDefault(); ev.stopPropagation();
+    openLink(b.dataset.link);
+  }));
+}
+
+// sources view
+function renderSources(data) {
+  const ps = data.passages || [];
+  const conf = data.confidence || (ps.length ? "ok" : "none");
+  const confText = { ok: "passende Stellen", low: "nur lose passend", none: "nichts gefunden" }[conf] || conf;
+  const scope = data.documents && data.documents.length ? ` · nur ${data.documents.length} ausgewählte Dokumente` : "";
+  const cards = ps.map((p) => {
+    const full = String(p.text || "");
+    const short = full.length > 320 ? full.slice(0, 320).replace(/\s+\S*$/, "") + " …" : full;
+    const where = [p.course_name, p.folder].filter(Boolean).join(" / ");
+    return `<article class="src">
+      <div class="head">${badge(p.activity_ref || data.course_ref)}<span class="title">${esc(p.title)}</span>${p.locator ? `<span class="chip">${esc(p.locator)}</span>` : ""}</div>
+      ${where ? `<div class="where">${esc(where)}</div>` : ""}
+      <blockquote data-full="${esc(full)}" data-short="${esc(short)}">${esc(short)}</blockquote>
+      <div class="foot">
+        ${full.length > short.length ? `<button class="linkbtn more">ganze Stelle zeigen</button>` : "<span></span>"}
+        ${p.link ? `<button class="linkbtn" data-link="${esc(p.link)}">In ${esc(PLATFORM[platformOf(p.activity_ref)] || "LMS")} öffnen ↗</button>` : ""}
+      </div>
+    </article>`;
+  }).join("");
+  $app.innerHTML = `<h2>Quellen <span class="sub">${ps.length} ${ps.length === 1 ? "Stelle" : "Stellen"}${scope}</span>
+      <span class="conf ${esc(conf)}">${esc(confText)}</span></h2>
+    ${conf === "low" ? `<p class="note">Diese Stellen passen nur lose zur Frage. Prüfe sie, bevor du dich auf die Antwort verlässt.</p>`
+      : conf === "none" ? `<p class="note">Im Kursmaterial wurde dazu nichts gefunden.</p>` : ""}
+    <div class="sources">${cards}</div>`;
+  $app.querySelectorAll(".more").forEach((b) => b.addEventListener("click", () => {
+    const q = b.closest(".src").querySelector("blockquote");
+    const expanded = b.dataset.expanded === "1";
+    q.textContent = expanded ? q.dataset.short : q.dataset.full;
+    b.dataset.expanded = expanded ? "" : "1";
+    b.textContent = expanded ? "ganze Stelle zeigen" : "weniger zeigen";
+  }));
+  wireLinks();
+}
+
+// ---- start -------------------------------------------------------------------
+(async () => {
+  try {
+    const res = await request("ui/initialize", {
+      protocolVersion: "2026-01-26",
+      appInfo: { name: "lms-ai-bridge-course-view", version: "0.1.0" },
+      appCapabilities: {},
+    });
+    hostCaps = (res && res.hostCapabilities) || {};
+    applyContext((res && res.hostContext) || {});
+    notify("ui/notifications/initialized", {});
+  } catch (e) {
+    flash("Verbindung zum Chat fehlgeschlagen: " + e.message);
+  }
+  reportSize();
+})();
+</script>
+</body>
+</html>

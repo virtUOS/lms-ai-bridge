@@ -62,12 +62,40 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bridge.contract import IndexRequest  # noqa: E402
+from bridge.documents import doc_id, lms_link  # noqa: E402
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {"name": "lms-ai-bridge", "version": "0.1.0"}
 PLATFORMS = ("moodle", "studip", "ilias")
 # Cosine similarity below which a search result is flagged as loosely related.
 LOW_CONFIDENCE = float(os.environ.get("MCP_LOW_CONFIDENCE", "0.5"))
+
+# SPIKE (2026-10-29): MCP Apps. Off unless BRIDGE_MCP_APPS is set, so hosts
+# that never asked for interactive views (HAWKI) see exactly what they saw.
+VIEW_URI = "ui://lms-ai-bridge/course-view.html"
+VIEW_MIME = "text/html;profile=mcp-app"
+VIEW_TOOLS = ("list_indexed_courses", "search_course")
+
+
+def apps_enabled() -> bool:
+    return os.environ.get("BRIDGE_MCP_APPS", "").lower() in ("1", "true", "yes")
+
+
+def _view_html() -> str:
+    return (Path(__file__).resolve().parent / "apps" / "course_view.html").read_text(encoding="utf-8")
+
+
+def _lms_origins() -> list[str]:
+    """The LMS sites the view may open links to: declared, so the host's
+    link check lets them through and nothing else."""
+    out = []
+    for env in ("STUDIP_URL", "ILIAS_URL", "MOODLE_URL"):
+        url = os.environ.get(env, "").rstrip("/")
+        if url.startswith("https://"):
+            origin = "/".join(url.split("/")[:3])
+            if origin not in out:
+                out.append(origin)
+    return out
 
 TOOLS = [
     {
@@ -113,6 +141,11 @@ TOOLS = [
                 "course_ref": {"type": "string", "description": "e.g. ilias:86, moodle:5, studip:<id>"},
                 "query": {"type": "string"},
                 "k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6},
+                "documents": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "optional: search only these documents, by the doc_id "
+                                   "values the user selected (e.g. from the course view)",
+                },
             },
             "required": ["course_ref", "query"],
             "additionalProperties": False,
@@ -158,6 +191,11 @@ def _course_names(provider) -> dict[str, str]:
     return {}
 
 
+def _documents(provider, course_ref: str) -> list[dict]:
+    listing = getattr(provider, "documents", None)
+    return list(listing(course_ref)) if callable(listing) else []
+
+
 def _fetch_documents(platform: str, course_id: str) -> tuple[str, list[dict]]:
     """Run the platform adapter in-process. Separate so tests can patch it."""
     adapters_dir = Path(__file__).resolve().parent.parent / "adapters"
@@ -198,6 +236,20 @@ def tool_list_indexed_courses(provider, args: dict) -> dict:
     }
 
 
+def course_view_data(provider) -> dict:
+    """What the course view draws (SPIKE, MCP Apps): every visible course with
+    its documents and links. For the view only, never the model's context — a
+    course can carry a hundred documents."""
+    out = tool_list_indexed_courses(provider, {})
+    for c in out["courses"]:
+        c["link"] = lms_link(c["course_ref"])
+        c["documents"] = [
+            dict(d, link=lms_link(d["activity_ref"]))
+            for d in _documents(provider, c["course_ref"])
+        ]
+    return out
+
+
 def tool_index_course(provider, args: dict) -> dict:
     _require(args, "platform", "course_id")
     platform = str(args["platform"]).lower()
@@ -230,14 +282,20 @@ def tool_search_course(provider, args: dict) -> dict:
     # right for /v1/chat (the model gets the passages, the LMS gets the
     # citations) and useless here, where the host model IS the answerer. The
     # first live run returned page numbers with no text — 2026-09-22.
-    hits = provider.search(course_ref, str(args["query"]), k=max(1, min(k, 20)))
+    only = {str(d) for d in (args.get("documents") or []) if d} or None
+    hits = provider.search(course_ref, str(args["query"]), k=max(1, min(k, 20)),
+                           **({"documents": only} if only else {}))
     passages = []
     for s, text in hits:
         d = asdict(s)
         d["text"] = text
         d["citation"] = _citation(s)
+        d["doc_id"] = doc_id(s.activity_ref)
+        d["link"] = lms_link(s.activity_ref, s.locator)
         passages.append(d)
     out = {"course_ref": course_ref, "passages": passages}
+    if only:
+        out["documents"] = sorted(only)
     if not passages:
         out["confidence"] = "none"
         out["note"] = ("Retrieval found nothing relevant in this course. Tell the user the "
@@ -303,8 +361,11 @@ class _UserView:
     def count(self, course_ref: str) -> int:
         return self._provider.count(course_ref) if self._visible(course_ref) else 0
 
-    def search(self, course_ref: str, query: str, k: int = 6):
-        return self._provider.search(course_ref, query, k=k) if self._visible(course_ref) else []
+    def search(self, course_ref: str, query: str, k: int = 6, **kw):
+        return self._provider.search(course_ref, query, k=k, **kw) if self._visible(course_ref) else []
+
+    def documents(self, course_ref: str) -> list[dict]:
+        return _documents(self._provider, course_ref) if self._visible(course_ref) else []
 
 
 # --------------------------------------------------------------------------
@@ -341,10 +402,14 @@ def handle(msg: dict, provider, user=None, may_see=None) -> dict | None:
     params = msg.get("params") or {}
     is_notification = "id" not in msg
 
+    apps = apps_enabled()
     if method == "initialize":
+        caps = {"tools": {"listChanged": False}}
+        if apps:
+            caps["resources"] = {"listChanged": False}
         return _result(rid, {
             "protocolVersion": params.get("protocolVersion") or PROTOCOL_VERSION,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": caps,
             "serverInfo": SERVER_INFO,
             "instructions": (
                 "Course material from Moodle, ILIAS and Stud.IP. Start with "
@@ -357,14 +422,36 @@ def handle(msg: dict, provider, user=None, may_see=None) -> dict | None:
         return _result(rid, {})
     if method == "tools/list":
         tools = TOOLS if user is None else [t for t in TOOLS if t["name"] in READ_TOOLS]
+        if apps:
+            tools = [dict(t, _meta={"ui": {"resourceUri": VIEW_URI}}) if t["name"] in VIEW_TOOLS else t
+                     for t in tools]
         return _result(rid, {"tools": tools})
+    if apps and method == "resources/list":
+        return _result(rid, {"resources": [{"uri": VIEW_URI, "name": "course-view",
+                                            "title": "Kursmaterial", "mimeType": VIEW_MIME}]})
+    if apps and method == "resources/read":
+        if params.get("uri") != VIEW_URI:
+            return _error(rid, -32002, f"resource not found: {params.get('uri')}")
+        return _result(rid, {"contents": [{
+            "uri": VIEW_URI, "mimeType": VIEW_MIME, "text": _view_html(),
+            # LibreChat lets ui/open-link through only to origins named in
+            # connect-, resource- or frameDomains. frameDomains is the narrowest:
+            # the view frames nothing, so it grants no fetch and no scripts.
+            "_meta": {"ui": {"csp": {"frameDomains": _lms_origins()}, "prefersBorder": False}},
+        }]})
     if method == "tools/call":
         name = params.get("name", "")
         handler = TOOL_HANDLERS.get(name) if user is None or name in READ_TOOLS else None
         if handler is None:
             return _result(rid, _tool_result({"error": f"unknown tool {name!r}"}, is_error=True))
         try:
-            return _result(rid, _tool_result(handler(provider, params.get("arguments") or {})))
+            payload = handler(provider, params.get("arguments") or {})
+            out = _tool_result(payload)
+            if apps and name == "list_indexed_courses":
+                out["structuredContent"] = course_view_data(provider)
+            elif apps and name == "search_course":
+                out["structuredContent"] = payload
+            return _result(rid, out)
         except ToolError as exc:
             return _result(rid, _tool_result({"error": str(exc)}, is_error=True))
         except Exception as exc:  # never let one tool call kill the session

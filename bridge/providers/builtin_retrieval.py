@@ -46,6 +46,7 @@ from collections import Counter
 from pathlib import Path
 
 from ..contract import IndexRequest, RetrievalProvider, Source
+from ..documents import doc_id, group_documents
 
 _WORD = re.compile(r"\w+", re.UNICODE)
 
@@ -226,9 +227,12 @@ class BuiltinRetrieval(RetrievalProvider):
             self._save()
         return len(entries)
 
-    def _scored(self, course_ref: str, query: str, k: int) -> list[tuple[float, dict]]:
+    def _scored(self, course_ref: str, query: str, k: int,
+                only: set[str] | None = None) -> list[tuple[float, dict]]:
         with self._lock:
             entries = list(self._store.get(course_ref, []))
+        if only:
+            entries = [e for e in entries if doc_id(e["activity_ref"]) in only]
         if not entries:
             return []
 
@@ -312,8 +316,10 @@ class BuiltinRetrieval(RetrievalProvider):
     def passages(self, course_ref: str, query: str, k: int = 4) -> list[str]:
         return [e["text"] for _, e in self._scored(course_ref, query, k)]
 
-    def search(self, course_ref: str, query: str, k: int = 4) -> list[tuple[Source, str]]:
-        return [(self._source(s, e), e["text"]) for s, e in self._scored(course_ref, query, k)]
+    def search(self, course_ref: str, query: str, k: int = 4,
+               documents: set[str] | None = None) -> list[tuple[Source, str]]:
+        return [(self._source(s, e), e["text"])
+                for s, e in self._scored(course_ref, query, k, only=documents)]
 
     @staticmethod
     def _source(score: float, e: dict) -> Source:
@@ -340,6 +346,11 @@ class BuiltinRetrieval(RetrievalProvider):
         with self._lock:
             return {ref: next((e.get("course_name", "") for e in entries if e.get("course_name")), "")
                     for ref, entries in self._store.items()}
+
+    def documents(self, course_ref: str) -> list[dict]:
+        """The course's documents (see bridge/documents.py); [] if not indexed."""
+        with self._lock:
+            return group_documents(self._store.get(course_ref, []))
 
     def count(self, course_ref: str) -> int:
         """How many chunks are stored for a course. 0 means not indexed."""
