@@ -34,6 +34,10 @@ JSON-RPC 2.0, one message per line, UTF-8; the methods a host needs are
 `tools/call`. Everything else answers "method not found", which hosts treat
 as "unsupported", not as failure. Logging goes to stderr — stdout is the wire.
 
+Revision 2026-07-28 drops `initialize` and `ping`, and adds
+`server/discover`. A request that names its version in `_meta` is served that
+way (see `handle()`), next to the older revisions.
+
 The same providers and the same index file as the HTTP server: a course
 indexed by `demo-ilias.sh` is immediately searchable here.
 
@@ -58,6 +62,7 @@ course" — is not built yet, so the default shows a user nothing.
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -72,6 +77,20 @@ from bridge.contract import IndexRequest  # noqa: E402
 from bridge.documents import doc_id, lms_link  # noqa: E402
 
 PROTOCOL_VERSION = "2025-06-18"
+# Revision 2026-07-28 dropped the `initialize` handshake: a request names its
+# version in `params._meta` ("modern"). Older revisions ("legacy") open with
+# `initialize`. The bridge answers both on the same endpoint, as the spec
+# allows: LibreChat's SDK 1.32 speaks only legacy, HAWKI's PHP SDK v2 both
+# (checked 2026-10-31).
+MODERN_VERSIONS = ("2026-07-28",)
+LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+META_VERSION = "io.modelcontextprotocol/protocolVersion"
+META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+HEADER_MISMATCH = -32020
+UNSUPPORTED_PROTOCOL_VERSION = -32022
+# How long a modern client may cache tools/list, resources/* and
+# server/discover: they change only with a deploy.
+CACHE_TTL_MS = 300_000
 SERVER_INFO = {"name": "lms-ai-bridge", "version": "0.1.0"}
 PLATFORMS = ("moodle", "studip", "ilias")
 # Cosine similarity below which a search result is flagged as loosely related.
@@ -427,8 +446,69 @@ def _result(rid, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": rid, "result": result}
 
 
-def _error(rid, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
+def _error(rid, code: int, message: str, data: dict | None = None) -> dict:
+    error = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": rid, "error": error}
+
+
+def request_version(msg: dict) -> str | None:
+    """The protocol version a modern request names in its `_meta`; None for a
+    legacy message, which has no such field."""
+    params = msg.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    version = meta.get(META_VERSION) if isinstance(meta, dict) else None
+    return version if isinstance(version, str) and version else None
+
+
+# The body field a modern request's `Mcp-Name` header mirrors.
+_NAME_FIELDS = {"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}
+
+
+def _header_value(value: str | None) -> str | None:
+    """A mirrored header value, with the `=?base64?…?=` form decoded; None if
+    absent or undecodable."""
+    if value is None or not (value.startswith("=?base64?") and value.endswith("?=")):
+        return value
+    try:
+        return base64.b64decode(value[len("=?base64?"):-len("?=")], validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def header_mismatch(msg: dict, header) -> str | None:
+    """Why a modern HTTP request's headers disagree with its body, or None.
+
+    `header(name)` returns a request header, case-insensitively, or None. A
+    gateway may route on the headers while the bridge acts on the body, so
+    the spec makes the server reject any difference (Streamable HTTP, "Server
+    Validation"). The method and name headers are checked only for versions
+    the bridge speaks; an unknown version gets UnsupportedProtocolVersionError
+    instead.
+    """
+    if "id" not in msg:
+        return None  # the spec defines no header rules for notifications
+    version = request_version(msg)
+    if header("MCP-Protocol-Version") != version:
+        return f"MCP-Protocol-Version header does not match the body's {version!r}"
+    if version not in MODERN_VERSIONS:
+        return None
+    method = msg.get("method")
+    if header("Mcp-Method") != method:
+        return f"Mcp-Method header does not match method {method!r}"
+    field = _NAME_FIELDS.get(method)
+    if field and _header_value(header("Mcp-Name")) != (msg.get("params") or {}).get(field):
+        return f"Mcp-Name header does not match params.{field}"
+    return None
+
+
+def _cacheable(result: dict, scope: str, modern: bool) -> dict:
+    """Add the caching hints 2026-07-28 requires on list and read results.
+    `scope` is "private" when the answer depends on who asks."""
+    if modern:
+        result.update(ttlMs=CACHE_TTL_MS, cacheScope=scope)
+    return result
 
 
 def _tool_result(payload: dict, is_error: bool = False) -> dict:
@@ -444,7 +524,42 @@ def handle(msg: dict, provider, user=None, may_see=None) -> dict | None:
     `user` is None for the service caller (stdio, or the static bridge token),
     which keeps every tool. A user caller gets `READ_TOOLS` over the courses
     `may_see(user, course_ref)` allows; with no `may_see`, none.
+
+    A message whose `_meta` names a protocol version is a modern request
+    (2026-07-28): no `initialize` comes first, and every result says
+    `resultType` and who answered. Anything else is served as before.
     """
+    version = request_version(msg)
+    if version is None:
+        return _dispatch(msg, provider, user, may_see, modern=False)
+    if version not in MODERN_VERSIONS:
+        if "id" not in msg:
+            return None
+        return _error(msg.get("id"), UNSUPPORTED_PROTOCOL_VERSION, "unsupported protocol version",
+                      {"supported": [*MODERN_VERSIONS, *LEGACY_VERSIONS], "requested": version})
+    reply = _dispatch(msg, provider, user, may_see, modern=True)
+    if reply is not None and "result" in reply:
+        reply["result"]["resultType"] = "complete"
+        reply["result"].setdefault("_meta", {})[META_SERVER_INFO] = SERVER_INFO
+    return reply
+
+
+INSTRUCTIONS = (
+    "Course material from Moodle, ILIAS and Stud.IP. Start with "
+    "list_indexed_courses. Answer only from search_course passages and cite "
+    "them by their 'citation' field; if passages are empty, say the material "
+    "does not cover it."
+)
+
+
+def _capabilities(apps: bool) -> dict:
+    caps = {"tools": {"listChanged": False}}
+    if apps:
+        caps["resources"] = {"listChanged": False}
+    return caps
+
+
+def _dispatch(msg: dict, provider, user, may_see, modern: bool) -> dict | None:
     if user is not None:
         provider = _UserView(provider, user, may_see)
     method = msg.get("method")
@@ -454,41 +569,46 @@ def handle(msg: dict, provider, user=None, may_see=None) -> dict | None:
 
     apps = apps_enabled()
     if method == "initialize":
-        caps = {"tools": {"listChanged": False}}
-        if apps:
-            caps["resources"] = {"listChanged": False}
+        # Always the legacy era: a client asking for a modern version here
+        # gets the newest one that still has `initialize`.
+        requested = params.get("protocolVersion")
         return _result(rid, {
-            "protocolVersion": params.get("protocolVersion") or PROTOCOL_VERSION,
-            "capabilities": caps,
+            "protocolVersion": requested if requested in LEGACY_VERSIONS else PROTOCOL_VERSION,
+            "capabilities": _capabilities(apps),
             "serverInfo": SERVER_INFO,
-            "instructions": (
-                "Course material from Moodle, ILIAS and Stud.IP. Start with "
-                "list_indexed_courses. Answer only from search_course passages and cite "
-                "them by their 'citation' field; if passages are empty, say the material "
-                "does not cover it."
-            ),
+            "instructions": INSTRUCTIONS,
         })
-    if method == "ping":
+    if method == "server/discover":
+        return _result(rid, _cacheable({
+            "supportedVersions": [*MODERN_VERSIONS, *LEGACY_VERSIONS],
+            "capabilities": _capabilities(apps),
+            "instructions": INSTRUCTIONS,
+        }, "public", modern=True))
+    if method == "ping" and not modern:  # gone from 2026-07-28
         return _result(rid, {})
     if method == "tools/list":
         tools = TOOLS if user is None else [t for t in TOOLS if t["name"] in READ_TOOLS]
         if apps:
             tools = [dict(t, _meta={"ui": {"resourceUri": VIEW_URI}}) if t["name"] in VIEW_TOOLS else t
                      for t in tools]
-        return _result(rid, {"tools": tools})
+        return _result(rid, _cacheable({"tools": tools}, "private", modern))
     if apps and method == "resources/list":
-        return _result(rid, {"resources": [{"uri": VIEW_URI, "name": "course-view",
-                                            "title": "Kursmaterial", "mimeType": VIEW_MIME}]})
+        return _result(rid, _cacheable(
+            {"resources": [{"uri": VIEW_URI, "name": "course-view",
+                            "title": "Kursmaterial", "mimeType": VIEW_MIME}]},
+            "public", modern))
     if apps and method == "resources/read":
         if params.get("uri") != VIEW_URI:
-            return _error(rid, -32002, f"resource not found: {params.get('uri')}")
-        return _result(rid, {"contents": [{
+            # 2026-07-28 moved "not found" to Invalid Params (-32602).
+            return _error(rid, -32602 if modern else -32002,
+                          f"resource not found: {params.get('uri')}")
+        return _result(rid, _cacheable({"contents": [{
             "uri": VIEW_URI, "mimeType": VIEW_MIME, "text": _view_html(),
             # LibreChat lets ui/open-link through only to origins named in
             # connect-, resource- or frameDomains. frameDomains is the narrowest:
             # the view frames nothing, so it grants no fetch and no scripts.
             "_meta": {"ui": {"csp": {"frameDomains": _lms_origins()}, "prefersBorder": False}},
-        }]})
+        }]}, "public", modern))
     if method == "tools/call":
         name = params.get("name", "")
         handler = TOOL_HANDLERS.get(name) if user is None or name in READ_TOOLS else None

@@ -34,7 +34,9 @@ from .contract import (
 from .providers.builtin_retrieval import BuiltinRetrieval
 from .demo_page import PAGE
 from .jobs import JobRunner
-from .mcp_server import handle as mcp_handle
+from .mcp_server import (HEADER_MISMATCH, UNSUPPORTED_PROTOCOL_VERSION,
+                         handle as mcp_handle, header_mismatch as mcp_header_mismatch,
+                         request_version as mcp_request_version)
 from .providers.embedding_retrieval import EmbeddingRetrieval
 from .providers.transcription import make_transcription
 from .providers.external_stub import ExternalHTTPRetrieval, NullRetrieval
@@ -513,6 +515,12 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             return self._send(400, {"jsonrpc": "2.0", "id": None,
                                     "error": {"code": -32600, "message": "invalid request"}})
+        version = mcp_request_version(payload)
+        if version is not None:
+            problem = mcp_header_mismatch(payload, self.headers.get)
+            if problem:
+                return self._send(400, {"jsonrpc": "2.0", "id": payload.get("id"), "error": {
+                    "code": HEADER_MISMATCH, "message": f"Header mismatch: {problem}"}})
         user = None if caller.kind == "service" else caller
         reply = mcp_handle(payload, self.retrieval_provider,
                            user=user, may_see=self.course_policy)
@@ -521,7 +529,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return None
-        return self._send(200, reply)
+        # A modern request's errors carry HTTP status codes of their own, which
+        # is how a client tells this server from a legacy one. Legacy requests
+        # keep getting 200 for everything, as before.
+        status = 200
+        if version is not None and "error" in reply:
+            status = {UNSUPPORTED_PROTOCOL_VERSION: 400, -32601: 404}.get(reply["error"]["code"], 200)
+        return self._send(status, reply)
 
     def _forget(self, payload: dict):
         course_ref = str(payload.get("course_ref") or "")

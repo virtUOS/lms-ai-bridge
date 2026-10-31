@@ -155,6 +155,21 @@ return, `Authorization: Bearer $BRIDGE_TOKEN`). That is the transport
 server-side hosts use — HAWKI registers an MCP server as a URL plus API key in
 its `config/tools.php` and calls it exactly this way.
 
+**Protocol versions.** Both transports speak MCP 2026-07-28 and the older
+revisions (2025-11-25 back to 2024-11-05) side by side, as the spec's
+"dual-era" server.
+- A client that opens with `initialize` gets the older protocol, unchanged.
+  LibreChat does this: its SDK 1.32 knows nothing newer.
+- A request that names `2026-07-28` in its `_meta` is answered statelessly,
+  and `server/discover` lists both eras. Over HTTP, its `MCP-Protocol-Version`,
+  `Mcp-Method` and `Mcp-Name` headers must match the body, or the answer is a
+  400 `HeaderMismatch`.
+
+Checked on 2026-10-31 with real clients:
+- the TypeScript SDK 1.32.1 stays on 2025-11-25;
+- `@modelcontextprotocol/client` 2.4.0 in `auto` mode and HAWKI's
+  `logiscape/mcp-sdk-php` 2.0.0 both switch to 2026-07-28 by themselves.
+
 **Per-user tokens (optional, first step).** `/mcp` can also accept a user's
 own OIDC access token, as LibreChat sends it with `Authorization: Bearer
 {{LIBRECHAT_OPENID_ACCESS_TOKEN}}` (v0.8.8 refreshes it and retries on a 401).
