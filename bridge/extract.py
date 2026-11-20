@@ -56,6 +56,7 @@ __all__ = [
     "extract_pdf_pages",
     "extract_pdf_pages_with_engine",
     "PdfExtractionError",
+    "ScannedPdfError",
 ]
 
 
@@ -68,13 +69,18 @@ class PdfExtractionError(Exception):
     """
 
 
-class _NoTextFound(PdfExtractionError):
+class ScannedPdfError(PdfExtractionError):
     """Poppler read the file and found no text — that is, it is a scan.
 
     A subclass so every existing caller still catches it. It exists so the
     auto path can tell "read it, there is no text" (say OCR) apart from "could
-    not parse it at all" (the fallback's message is more informative there).
+    not parse it at all" (the fallback's message is more informative there),
+    and so an adapter can queue a scan for reading (bridge/scans.py) instead
+    of skipping it.
     """
+
+
+_NoTextFound = ScannedPdfError
 
 
 

@@ -38,7 +38,10 @@ from .mcp_server import (HEADER_MISMATCH, UNSUPPORTED_PROTOCOL_VERSION,
                          handle as mcp_handle, header_mismatch as mcp_header_mismatch,
                          request_version as mcp_request_version)
 from .providers.embedding_retrieval import EmbeddingRetrieval
+from .providers.image_text import ImageTextConfigError, make_image_text
 from .providers.transcription import make_transcription
+from .scans import (TEXT_FLOOR, TextCache, cache_key, can_render_pdf, image_mime,
+                    pages_with_images, pdf_page_count, render_pdf_page)
 from .providers.external_stub import ExternalHTTPRetrieval, NullRetrieval
 from .providers.openai_chat import EchoChat, OpenAICompatibleChat
 
@@ -71,9 +74,7 @@ def build_providers():
     # better provider is used when configured, and the fallback keeps the
     # capability available everywhere. `/v1/capabilities` reports which is live.
     mode = os.environ.get("RETRIEVAL_PROVIDER", "auto").strip().lower()
-    store = os.environ.get("RETRIEVAL_STORE", "") or (
-        Path(__file__).parent.parent / ".index.json"
-    )
+    store = index_store_path()
 
     if mode == "none":
         retrieval = NullRetrieval()
@@ -104,6 +105,26 @@ def build_providers():
 # discarded every source of a well-grounded answer, which looked far worse than
 # the problem it was meant to solve.
 _CITATION = re.compile(r"[\[\uFF3B\u3010]\s*(\d+)\s*[\]\uFF3D\u3011]")
+
+
+def index_store_path() -> Path:
+    return Path(os.environ.get("RETRIEVAL_STORE", "")
+                or Path(__file__).parent.parent / ".index.json")
+
+
+def image_text_from_env(env, store: Path):
+    """(reader, cache, startup line). Off when unset, and off with the reason
+    when misconfigured: a typo in a setting must not take chat down with it."""
+    try:
+        reader = make_image_text(env)
+    except ImageTextConfigError as e:
+        return None, None, f"off — {e}"
+    if reader is None:
+        return None, None, "none (scans skipped)"
+    cache = TextCache(env.get("IMAGE_TEXT_CACHE")
+                      or Path(store).with_name("image-text-cache.json"))
+    pdf = "" if can_render_pdf() else " — image files only: poppler-utils missing, PDF pages unread"
+    return reader, cache, f"{reader.name}{pdf}"
 
 
 def _keep_cited_sources(answer: str, sources: list) -> tuple[str, list]:
@@ -141,6 +162,10 @@ class Handler(BaseHTTPRequestHandler):
     chat_provider = None
     retrieval_provider = None
     transcription_provider = None
+    # Reads scans and images (bridge/providers/image_text.py), and remembers
+    # what it read so re-indexing does not pay twice (bridge/scans.py).
+    image_text_provider = None
+    image_text_cache = None
     jobs = None
     auth_token = ""
     # Per-user tokens (bridge/auth.py): which identity providers are trusted,
@@ -323,6 +348,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.transcription_provider is not None:
                 caps.append("transcription")
                 providers["transcription"] = self.transcription_provider.name
+            if self.image_text_provider is not None:
+                caps.append("image_text")
+                providers["image_text"] = self.image_text_provider.name
             return self._send(
                 200,
                 {
@@ -423,25 +451,137 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, resp.to_dict())
 
     def _index(self, payload: dict):
-        req = IndexRequest.from_dict(payload)
-        chunks = self.retrieval_provider.index(req)
+        scans = payload.get("scans") or []
+        if not payload.get("documents") and (scans or payload.get("media")):
+            # A course of scans or recordings alone has no text to index yet.
+            # Re-index semantics still hold: the old index goes, the background
+            # jobs fill the new one.
+            course_ref = str(payload.get("course_ref") or "")
+            if not course_ref:
+                raise ValueError("course_ref is required")
+            replace = bool(payload.get("replace", True))
+            if replace:
+                self.retrieval_provider.forget(course_ref)
+            n_docs, chunks = 0, 0
+        else:
+            req = IndexRequest.from_dict(payload)
+            course_ref, replace = req.course_ref, req.replace
+            n_docs, chunks = len(req.documents), self.retrieval_provider.index(req)
 
         # Audio arrives as a separate list so the text path never waits on it:
         # `media` entries are queued, transcribed in the background, and indexed
         # when ready. See bridge/jobs.py for why this is not synchronous.
-        queued = self._queue_media(req.course_ref, payload.get("media") or [])
+        queued = self._queue_media(course_ref, payload.get("media") or [])
+        # Scans likewise: a page takes a model call of several seconds.
+        files, pages, skipped = self._queue_scans(course_ref, scans)
 
         return self._send(
             200,
             {
-                "course_ref": req.course_ref,
-                "documents": len(req.documents),
+                "course_ref": course_ref,
+                "documents": n_docs,
                 "chunks": chunks,
-                "replaced": req.replace,
+                "replaced": replace,
                 "provider": self.retrieval_provider.name,
                 "transcription_queued": queued,
+                "image_text_queued": files,
+                "image_text_pages": pages,
+                "image_text_skipped": skipped,
             },
         )
+
+    def _queue_scans(self, course_ref: str, scans: list) -> tuple[int, int, int]:
+        """Queue scans for reading. Returns (files queued, pages queued, pages skipped).
+
+        Pages over `IMAGE_TEXT_MAX_PAGES` are skipped and counted: the cap is
+        what keeps one course from occupying a shared GPU, or a paid API, for
+        an afternoon.
+        """
+        reader = self.image_text_provider
+        if not scans or reader is None or self.jobs is None:
+            return 0, 0, 0
+
+        budget, files, queued, skipped = reader.max_pages, 0, 0, 0
+        for item in scans:
+            if not isinstance(item, dict) or not item.get("content_base64"):
+                continue
+            try:
+                blob = base64.b64decode(item["content_base64"])
+            except (ValueError, TypeError):
+                continue
+            meta = {k: str(item.get(k) or "") for k in
+                    ("activity_ref", "title", "licence", "course_name", "folder")}
+            meta["title"] = meta["title"] or "Scan"
+
+            if blob.startswith(b"%PDF"):
+                try:
+                    if not can_render_pdf():
+                        raise RuntimeError("poppler-utils is not installed, so PDF "
+                                           "pages cannot be rendered for reading")
+                    wanted = item.get("pages") or range(1, pdf_page_count(blob) + 1)
+                    # A short page with no image is a divider or blank: nothing to read.
+                    drawn = pages_with_images(blob)
+                    pages = [int(p) for p in wanted if int(p) in drawn]
+                except RuntimeError as e:
+                    self._fail_job(course_ref, meta["title"], e)
+                    continue
+                take = pages[:max(budget, 0)]
+                units = [(f"S. {p}", p) for p in take]
+                skipped += len(pages) - len(take)
+            else:
+                if not image_mime(blob):
+                    self._fail_job(course_ref, meta["title"],
+                                   RuntimeError("not an image format the reader accepts"))
+                    continue
+                units = [("", 0)] if budget > 0 else []
+                skipped += 0 if units else 1
+            if not units:
+                continue
+
+            budget -= len(units)
+            queued += len(units)
+            files += 1
+            self.jobs.submit(course_ref, meta["title"],
+                             lambda blob=blob, units=units, meta=meta:
+                                 self._read_scan(course_ref, blob, units, meta),
+                             kind="scan")
+        return files, queued, skipped
+
+    def _fail_job(self, course_ref: str, title: str, error: Exception) -> None:
+        """Record a scan that cannot be read, so it shows in /v1/jobs."""
+        def work() -> None:
+            raise error
+        self.jobs.submit(course_ref, title, work, kind="scan")
+
+    def _read_scan(self, course_ref: str, blob: bytes, units: list, meta: dict) -> None:
+        """Read one file's pages, index what was read, then report failures."""
+        reader, cache = self.image_text_provider, self.image_text_cache
+        docs, errors = [], []
+        for locator, page in units:
+            key = cache_key(blob, page, reader.name)
+            text = cache.get(key) if cache is not None else None
+            if text is None:
+                try:
+                    if page:
+                        text = reader.read(render_pdf_page(blob, page, reader.longest_edge),
+                                           "image/png")
+                    else:
+                        text = reader.read(blob, image_mime(blob))
+                except Exception as e:                       # noqa: BLE001
+                    errors.append(f"{locator or 'Bild'}: {str(e)[:150]}")
+                    continue
+                if cache is not None:
+                    cache.put(key, text)
+            body = re.sub(r"\s+", " ", text).strip()
+            if len(body) >= TEXT_FLOOR:
+                docs.append({**meta, "locator": locator, "text": body})
+        if docs:
+            # `replace: False` — the course's text is already indexed and must
+            # not be dropped when a scan's pages land.
+            self.retrieval_provider.index(IndexRequest.from_dict(
+                {"course_ref": course_ref, "documents": docs, "replace": False}))
+        if errors:
+            raise RuntimeError(f"{len(errors)} of {len(units)} pages not read; {errors[0]}")
 
     def _queue_media(self, course_ref: str, media: list) -> int:
         """Queue audio/video for background transcription. Returns how many."""
@@ -553,8 +693,11 @@ def main() -> int:
     Handler.chat_provider = chat
     Handler.retrieval_provider = retrieval
     Handler.transcription_provider = make_transcription()
+    reader, cache, image_text_line = image_text_from_env(os.environ, index_store_path())
+    Handler.image_text_provider, Handler.image_text_cache = reader, cache
     Handler.jobs = JobRunner(
-        max_workers=int(os.environ.get("ASR_MAX_CONCURRENT", "2")))
+        max_workers=int(os.environ.get("ASR_MAX_CONCURRENT", "2")),
+        limits={"scan": reader.max_concurrent if reader else 1})
     Handler.auth_token = os.environ.get("BRIDGE_TOKEN", "")
     Handler.identity_issuers = issuers_from_env()
     Handler.course_policy = policy_from_env()
@@ -563,6 +706,7 @@ def main() -> int:
     print(f"  chat provider      : {chat.name}")
     tp = Handler.transcription_provider
     print(f"  transcription      : {tp.name if tp else 'none (audio skipped)'}")
+    print(f"  image text         : {image_text_line}")
     print(f"  retrieval provider : {retrieval.name}")
     if isinstance(chat, EchoChat):
         print("  NOTE: no OPENAI_BASE_URL configured — running in offline echo mode.")

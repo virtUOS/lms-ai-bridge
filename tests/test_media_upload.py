@@ -96,7 +96,10 @@ class TestCapabilityHandshake(unittest.TestCase):
             A.fetch_course_documents, A.bridge_post)
         A._bridge_can_transcribe = lambda: False
         A.fetch_course_media = lambda *a, **k: calls.append("collected") or []
-        A.fetch_course_documents = lambda cid: ("studip:C", [{"text": "x"}])
+        A.fetch_course_documents = lambda cid, **kw: ("studip:C", [{"text": "x"}])
+        # No scans either way: this is about media alone, and must not ask a
+        # real bridge on localhost whether it reads images.
+        saved_offers, A._bridge_offers = A._bridge_offers, lambda cap: False
         A.bridge_post = lambda path, payload: payload
         try:
             payload = A.index_course("C")
@@ -104,6 +107,7 @@ class TestCapabilityHandshake(unittest.TestCase):
             (A._bridge_can_transcribe, A.fetch_course_media,
              A.fetch_course_documents, A.bridge_post) = (
                 saved_caps, saved_media, saved_docs, saved_post)
+            A._bridge_offers = saved_offers
         self.assertEqual(calls, [])
         self.assertNotIn("media", payload)
 
@@ -114,7 +118,10 @@ class TestCapabilityHandshake(unittest.TestCase):
         A._bridge_can_transcribe = lambda: True
         A.fetch_course_media = lambda *a, **k: [{"title": "V.mp3",
                                                  "content_base64": "eA=="}]
-        A.fetch_course_documents = lambda cid: ("studip:C", [{"text": "x"}])
+        A.fetch_course_documents = lambda cid, **kw: ("studip:C", [{"text": "x"}])
+        # No scans either way: this is about media alone, and must not ask a
+        # real bridge on localhost whether it reads images.
+        saved_offers, A._bridge_offers = A._bridge_offers, lambda cap: False
         A.bridge_post = lambda path, payload: payload
         try:
             payload = A.index_course("C")
@@ -122,6 +129,7 @@ class TestCapabilityHandshake(unittest.TestCase):
             (A._bridge_can_transcribe, A.fetch_course_media,
              A.fetch_course_documents, A.bridge_post) = (
                 saved_caps, saved_media, saved_docs, saved_post)
+            A._bridge_offers = saved_offers
         self.assertEqual(len(payload["media"]), 1)
 
     def test_an_unreachable_bridge_means_no_media_not_a_crash(self):

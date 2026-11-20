@@ -31,8 +31,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bridge.extract import (  # noqa: E402
     PdfExtractionError,
+    ScannedPdfError,
     extract_pdf_pages_with_engine,
 )
+from bridge.scans import add_scan, is_image, short_pages  # noqa: E402
 from bridge.extract_office import (  # noqa: E402
     OfficeExtractionError,
     extract_office_units,
@@ -124,13 +126,16 @@ def moodle_download(fileurl: str) -> bytes:
 
 
 def _file_documents(course_id: int, mod: dict, course_name: str = "",
-                    section_name: str = "") -> list[dict]:
+                    section_name: str = "", scans: list | None = None) -> list[dict]:
     """Download a module's files and return one document per page or slide.
 
     Mirrors the Stud.IP adapter: locators are "S. 12" for a PDF page and
     "Folie 4" for a slide, so a citation can be checked. One unreadable file
     costs its own document and never the course — a scanned PDF among twenty
     good ones should not empty the index.
+
+    With a `scans` list, scanned PDFs, the too-short pages of a normal one and
+    image files go there for the bridge to read (bridge/scans.py).
     """
     docs: list[dict] = []
     for content in mod.get("contents", []) or []:
@@ -138,7 +143,8 @@ def _file_documents(course_id: int, mod: dict, course_name: str = "",
             continue
         name = content.get("filename", "")
         fileurl = content.get("fileurl")
-        if not fileurl or not _EXTRACTABLE.search(name):
+        image = scans is not None and is_image(name, content.get("mimetype", ""))
+        if not fileurl or not (_EXTRACTABLE.search(name) or image):
             if fileurl:
                 print(f"  skipped {name}: no extractor for this format",
                       file=sys.stderr)
@@ -150,6 +156,14 @@ def _file_documents(course_id: int, mod: dict, course_name: str = "",
             print(f"  skipped {name}: {exc}", file=sys.stderr)
             continue
 
+        activity_ref = (f"moodle:{course_id}:file:{mod.get('id')}:"
+                        f"{mod.get('modname') or 'resource'}:{name}")
+        where = {"title": name, "activity_ref": activity_ref,
+                 "course_name": course_name, "folder": section_name}
+        if image:
+            add_scan(scans, blob, **where)
+            continue
+
         try:
             if blob.startswith(b"%PDF"):
                 pages, engine = extract_pdf_pages_with_engine(blob)
@@ -157,12 +171,20 @@ def _file_documents(course_id: int, mod: dict, course_name: str = "",
                     print(f"  {name}: stdlib PDF reader (install poppler-utils "
                           f"for complete extraction)", file=sys.stderr)
                 units = [(f"S. {i}", text) for i, text in enumerate(pages, 1)]
+                if scans is not None and short_pages(pages):
+                    add_scan(scans, blob, **where, pages=short_pages(pages))
             elif office_kind(blob):
                 units = extract_office_units(blob)
             else:
                 print(f"  skipped {name}: no extractor for this format",
                       file=sys.stderr)
                 continue
+        except ScannedPdfError as exc:
+            if scans is not None:
+                add_scan(scans, blob, **where)
+            else:
+                print(f"  skipped {name}: {exc}", file=sys.stderr)
+            continue
         except (PdfExtractionError, OfficeExtractionError) as exc:
             print(f"  skipped {name}: {exc}", file=sys.stderr)
             continue
@@ -178,8 +200,7 @@ def _file_documents(course_id: int, mod: dict, course_name: str = "",
                 {
                     # The module type rides along: Moodle's link to a file
                     # goes through mod/<type>/view.php (bridge/documents.py).
-                    "activity_ref": f"moodle:{course_id}:file:{mod.get('id')}:"
-                                    f"{mod.get('modname') or 'resource'}:{name}",
+                    "activity_ref": activity_ref,
                     "title": name,
                     "locator": locator,
                     "text": body,
@@ -194,7 +215,8 @@ def _file_documents(course_id: int, mod: dict, course_name: str = "",
     return docs
 
 
-def fetch_course_documents(course_id: int) -> tuple[str, list[dict]]:
+def fetch_course_documents(course_id: int,
+                           scans: list | None = None) -> tuple[str, list[dict]]:
     """Return (course_name, documents) for a Moodle course.
 
     Uses `core_course_get_contents`, which returns sections and modules with
@@ -271,7 +293,8 @@ def fetch_course_documents(course_id: int) -> tuple[str, list[dict]]:
             # The files themselves, not their names. Until 2026-08-27 this
             # recorded "[Datei: skript.pdf]" and stopped, so a course whose
             # substance sits in attachments indexed as a list of filenames.
-            docs.extend(_file_documents(course_id, mod, course_title, sec_name))
+            docs.extend(_file_documents(course_id, mod, course_title, sec_name,
+                                        scans=scans))
 
     # Stamped here rather than at each call site so a document type added later
     # cannot silently lose it.
@@ -297,13 +320,30 @@ def bridge_post(path: str, payload: dict) -> dict:
 
 
 def index_course(course_id: int) -> dict:
-    course_ref, docs = fetch_course_documents(course_id)
-    if not docs:
+    # Scans only when the bridge can read them: no upload it cannot use.
+    scans: list[dict] | None = [] if _bridge_offers("image_text") else None
+    course_ref, docs = fetch_course_documents(course_id, scans=scans)
+    if not docs and not scans:
         raise RuntimeError(f"no indexable text found in Moodle course {course_id}")
-    return bridge_post(
-        "/v1/index",
-        {"course_ref": course_ref, "documents": docs, "replace": True},
-    )
+    payload = {"course_ref": course_ref, "documents": docs, "replace": True}
+    if scans:
+        payload["scans"] = scans
+    return bridge_post("/v1/index", payload)
+
+def _bridge_offers(capability: str) -> bool:
+    """Ask the bridge what it can do, as the Stud.IP adapter does: the same
+    adapter serves deployments with very different infrastructure."""
+    try:
+        req = urllib.request.Request(
+            f"{BRIDGE_URL}/v1/capabilities",
+            headers={"Authorization": f"Bearer {BRIDGE_TOKEN}"} if BRIDGE_TOKEN else {},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            caps = json.loads(r.read().decode("utf-8")).get("capabilities", [])
+        return capability in caps
+    except (urllib.error.URLError, RuntimeError, ValueError):
+        return False
+
 
 
 def ask(course_id: int, question: str) -> dict:

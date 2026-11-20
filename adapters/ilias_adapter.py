@@ -64,8 +64,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bridge.extract import (  # noqa: E402
     PdfExtractionError,
+    ScannedPdfError,
     extract_pdf_pages_with_engine,
 )
+from bridge.scans import add_scan, is_image, short_pages  # noqa: E402
 from bridge.extract_office import (  # noqa: E402
     OfficeExtractionError,
     extract_office_units,
@@ -238,10 +240,11 @@ def parse_file_xml(xml: str) -> tuple[str, str, bytes | None]:
 
 
 def _file_documents(sid: str, course_ref: str, item: dict, course_name: str,
-                    folder: str) -> list[dict]:
+                    folder: str, scans: list | None = None) -> list[dict]:
     """One document per page or slide of a file object, same as the other
     adapters, so a citation reads "S. 12" or "Folie 4" whichever LMS it
-    came from."""
+    came from. With a `scans` list, scans and images go there for the bridge
+    to read (bridge/scans.py)."""
     name = item["title"]
     ref_id = item["ref_id"]
     try:
@@ -254,6 +257,11 @@ def _file_documents(sid: str, course_ref: str, item: dict, course_name: str,
     if blob is None:
         print(f"  skipped {filename}: no content returned", file=sys.stderr)
         return []
+    where = {"title": title, "activity_ref": f"{course_ref}:file:{ref_id}:{filename}",
+             "course_name": course_name, "folder": folder}
+    if scans is not None and is_image(filename):
+        add_scan(scans, blob, **where)
+        return []
     if not _EXTRACTABLE.search(filename):
         print(f"  skipped {filename}: no extractor for this format", file=sys.stderr)
         return []
@@ -265,11 +273,19 @@ def _file_documents(sid: str, course_ref: str, item: dict, course_name: str,
                 print(f"  {filename}: stdlib PDF reader (install poppler-utils "
                       f"for complete extraction)", file=sys.stderr)
             units = [(f"S. {i}", text) for i, text in enumerate(pages, 1)]
+            if scans is not None and short_pages(pages):
+                add_scan(scans, blob, **where, pages=short_pages(pages))
         elif office_kind(blob):
             units = extract_office_units(blob)
         else:
             print(f"  skipped {filename}: no extractor for this format", file=sys.stderr)
             return []
+    except ScannedPdfError as exc:
+        if scans is not None:
+            add_scan(scans, blob, **where)
+        else:
+            print(f"  skipped {filename}: {exc}", file=sys.stderr)
+        return []
     except (PdfExtractionError, OfficeExtractionError) as exc:
         print(f"  skipped {filename}: {exc}", file=sys.stderr)
         return []
@@ -281,7 +297,7 @@ def _file_documents(sid: str, course_ref: str, item: dict, course_name: str,
             continue
         docs.append(
             {
-                "activity_ref": f"{course_ref}:file:{ref_id}:{filename}",
+                "activity_ref": where["activity_ref"],
                 "title": title,
                 "locator": locator,
                 "text": body,
@@ -294,7 +310,8 @@ def _file_documents(sid: str, course_ref: str, item: dict, course_name: str,
 
 
 def _walk(sid: str, course_ref: str, ref_id: str, course_name: str,
-          folder: str, docs: list[dict], depth: int = 0) -> None:
+          folder: str, docs: list[dict], depth: int = 0,
+          scans: list | None = None) -> None:
     if depth > 8:
         return
     # No `user_id`: the writer behind getTreeChilds runs a permission check
@@ -304,7 +321,8 @@ def _walk(sid: str, course_ref: str, ref_id: str, course_name: str,
     tree = soap_call("getTreeChilds", [("sid", sid), ("ref_id", ref_id), ("types", "")])
     for item in parse_tree_xml(tree):
         if item["type"] == _FILE_TYPE:
-            docs.extend(_file_documents(sid, course_ref, item, course_name, folder))
+            docs.extend(_file_documents(sid, course_ref, item, course_name, folder,
+                                        scans=scans))
         elif item["type"] in _CONTAINER_TYPES and item["ref_id"]:
             sub = f"{folder}/{item['title']}" if folder else item["title"]
             if item["description"]:
@@ -317,7 +335,8 @@ def _walk(sid: str, course_ref: str, ref_id: str, course_name: str,
                         "folder": folder,
                     }
                 )
-            _walk(sid, course_ref, item["ref_id"], course_name, sub, docs, depth + 1)
+            _walk(sid, course_ref, item["ref_id"], course_name, sub, docs, depth + 1,
+                  scans=scans)
         elif item["description"] and len(item["description"]) >= 40:
             # Any other object contributes only its description — honest
             # about what SOAP gives us, which is metadata, not content.
@@ -332,7 +351,8 @@ def _walk(sid: str, course_ref: str, ref_id: str, course_name: str,
             )
 
 
-def fetch_course_documents(ref_id: str, sid: str | None = None) -> tuple[str, list[dict]]:
+def fetch_course_documents(ref_id: str, sid: str | None = None,
+                           scans: list | None = None) -> tuple[str, list[dict]]:
     """Return (course_ref, documents) for the course at `ref_id`."""
     own_session = sid is None
     sid = sid or login()
@@ -352,7 +372,7 @@ def fetch_course_documents(ref_id: str, sid: str | None = None) -> tuple[str, li
                         "course_name": title,
                     }
                 )
-        _walk(sid, course_ref, ref_id, title, "", docs)
+        _walk(sid, course_ref, ref_id, title, "", docs, scans=scans)
     finally:
         if own_session:
             logout(sid)
@@ -379,12 +399,30 @@ def bridge_post(path: str, payload: dict) -> dict:
 
 
 def index_course(ref_id: str) -> dict:
-    course_ref, docs = fetch_course_documents(ref_id)
-    if not docs:
+    # Scans only when the bridge can read them: no upload it cannot use.
+    scans: list[dict] | None = [] if _bridge_offers("image_text") else None
+    course_ref, docs = fetch_course_documents(ref_id, scans=scans)
+    if not docs and not scans:
         raise RuntimeError(f"no indexable text found in ILIAS course {ref_id}")
-    return bridge_post(
-        "/v1/index", {"course_ref": course_ref, "documents": docs, "replace": True}
-    )
+    payload = {"course_ref": course_ref, "documents": docs, "replace": True}
+    if scans:
+        payload["scans"] = scans
+    return bridge_post("/v1/index", payload)
+
+def _bridge_offers(capability: str) -> bool:
+    """Ask the bridge what it can do, as the Stud.IP adapter does: the same
+    adapter serves deployments with very different infrastructure."""
+    try:
+        req = urllib.request.Request(
+            f"{BRIDGE_URL}/v1/capabilities",
+            headers={"Authorization": f"Bearer {BRIDGE_TOKEN}"} if BRIDGE_TOKEN else {},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            caps = json.loads(r.read().decode("utf-8")).get("capabilities", [])
+        return capability in caps
+    except (urllib.error.URLError, RuntimeError, ValueError):
+        return False
+
 
 
 def ask(ref_id: str, question: str) -> dict:

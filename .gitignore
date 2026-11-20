@@ -5,6 +5,8 @@
 # Runtime artefacts
 .index.json
 *.index.json
+image-text-cache.json
+image-text-cache.json.tmp
 
 # Python
 __pycache__/

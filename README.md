@@ -45,8 +45,8 @@ its own; the point here is to feed whichever one an institution runs.
 
 ## Everything is a provider slot
 
-No AI infrastructure is bundled. Chat, embeddings and transcription are
-interfaces configured from the environment, so an institution uses what it
+No AI infrastructure is bundled. Chat, embeddings, transcription and reading
+images are interfaces configured from the environment, so an institution uses what it
 already operates:
 
 | Capability | Contract | Example in use here |
@@ -54,6 +54,7 @@ already operates:
 | Chat | any OpenAI-compatible endpoint | a LiteLLM gateway |
 | Retrieval | `RetrievalProvider` | `bge-m3` embeddings, or a lexical fallback |
 | Transcription | `TranscriptionProvider` | WhisperX/MurmurAI, or plain Whisper |
+| Reading scans and images | OpenAI-compatible chat with one image, `IMAGE_TEXT_MODEL` + `IMAGE_TEXT_MODE` (`ocr` or `vision`) | an OCR model, or any vision model on the gateway; off unless set |
 
 Where nothing is configured, the fallbacks keep working — worse, and honestly
 labelled. `GET /v1/capabilities` reports which is live, so an LMS adapter can
@@ -98,7 +99,11 @@ ILIAS 10), verified end to end against a live ILIAS 10.11 on 2026-09-22.
 
 ## What does not work yet
 
-- **Images.** Diagrams and scanned pages need a vision model or OCR. Not built.
+- **Figures.** Scanned pages, PDF pages without a text layer and image files
+  are read (see "File extraction"); diagrams and charts on pages that *have*
+  text are not described. That is the next step in
+  `docs/superpowers/specs/2026-11-20-image-text-design.md`. Stud.IP Courseware
+  images stay out of reach: they need a web session.
 - **Per-lecturer AI opt-in.** Everything reachable in a course is currently
   extracted. Only material a lecturer has explicitly released for AI should be —
   this is a precondition for real use and is the next piece of work.
@@ -312,9 +317,15 @@ documents the difference has been the whole file versus 12% of it. The built-in
 reader exists so the demo runs with nothing installed, not because it is good
 enough. An indexing run prints which one it used.
 
-Scanned PDFs are refused rather than indexed as empty, so a course cannot
-silently lose a file; reading them would need OCR, which this does not do.
-Legacy `.doc`/`.ppt`/`.xls` are refused too. One unreadable file never fails an
+**Scans and images are read when a deployment chooses a model for it**
+(`IMAGE_TEXT_MODEL`, `IMAGE_TEXT_MODE` in `.env.example`): scanned PDFs, PDF
+pages with too little text that carry an image, and image files in course
+folders. The adapters send them only when `/v1/capabilities` lists
+`image_text`; the bridge reads them in the background like recordings, files
+the text under the page it came from (`S. 12`), and remembers it so re-indexing
+does not pay twice. Without a model, scanned PDFs are refused rather than
+indexed as empty, so a course cannot silently lose a file. Legacy
+`.doc`/`.ppt`/`.xls` are refused too. One unreadable file never fails an
 indexing run.
 
 > Details — measurements, per-platform download quirks, what Courseware

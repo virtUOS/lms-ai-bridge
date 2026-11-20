@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bridge.extract import (  # noqa: E402
     PdfExtractionError,
+    ScannedPdfError,
     extract_pdf_pages_with_engine,
 )
 from bridge.extract_office import (  # noqa: E402
@@ -36,6 +37,7 @@ from bridge.extract_office import (  # noqa: E402
 )
 from adapters.studip_courseware import fetch_courseware  # noqa: E402
 from bridge.providers.transcription import is_transcribable  # noqa: E402
+from bridge.scans import add_scan, is_image, short_pages  # noqa: E402
 
 BRIDGE_URL = os.environ.get("BRIDGE_URL", "http://127.0.0.1:8080")
 BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "")
@@ -176,7 +178,7 @@ def _looks_extractable(name: str, mime: str) -> bool:
 
 
 def fetch_course_files(course_id: str, limit: int = 25,
-                       course_name: str = "") -> list[dict]:
+                       course_name: str = "", scans: list | None = None) -> list[dict]:
     """Extract text from a course's PDF attachments, one document per page.
 
     **This uses the bridge's fallback extractor, and only because nothing else
@@ -193,6 +195,12 @@ def fetch_course_files(course_id: str, limit: int = 25,
 
     A file that cannot be read never fails the run — a scanned PDF among twenty
     good ones must not cost the other nineteen.
+
+    **Scans.** With a `scans` list (only when the bridge can read images, see
+    `index_course`), a scanned PDF, the too-short pages of a normal one, and
+    image files are added there for the bridge to read in the background,
+    instead of being skipped. Without it, nothing changes: images are not even
+    downloaded.
 
     Note the two governance fields the API offers and this honours:
     `is-downloadable`, checked before fetching, and `terms-of-use`, which is
@@ -211,7 +219,8 @@ def fetch_course_files(course_id: str, limit: int = 25,
         a = ref.get("attributes", {}) or {}
         name = str(a.get("name", "")) or "Datei"
         mime = str(a.get("mime-type", ""))
-        if not _looks_extractable(name, mime):
+        image = scans is not None and is_image(name, mime)
+        if not _looks_extractable(name, mime) and not image:
             continue
 
         ref_id = ref.get("id")
@@ -225,6 +234,15 @@ def fetch_course_files(course_id: str, limit: int = 25,
             blob = studip_download(ref_id)
         except (urllib.error.URLError, RuntimeError) as e:
             print(f"  skipped {name}: {e}", file=sys.stderr)
+            continue
+
+        # Where a scan's text will be filed once read: the same document as
+        # the file's text pages, so "S. 12" cites and links the same way.
+        where = {"title": name, "activity_ref": f"studip:{course_id}:file:{ref_id}",
+                 "licence": _licence_of(ref), "course_name": course_name,
+                 "folder": _folder_of(ref, folders)}
+        if image:
+            add_scan(scans, blob, **where)
             continue
 
         # (locator, text) pairs, whatever the format: "S. 12" for a PDF page,
@@ -241,12 +259,20 @@ def fetch_course_files(course_id: str, limit: int = 25,
                     print(f"  {name}: stdlib PDF reader (install poppler-utils "
                           f"for complete extraction)", file=sys.stderr)
                 units = [(f"S. {i}", t) for i, t in enumerate(pages, 1)]
+                if scans is not None and short_pages(pages):
+                    add_scan(scans, blob, **where, pages=short_pages(pages))
             elif office_kind(blob):
                 units = extract_office_units(blob)
             else:
                 print(f"  skipped {name}: no extractor for this format",
                       file=sys.stderr)
                 continue
+        except ScannedPdfError as e:
+            if scans is not None:
+                add_scan(scans, blob, **where)
+            else:
+                print(f"  skipped {name}: {e}", file=sys.stderr)
+            continue
         except (PdfExtractionError, OfficeExtractionError) as e:
             print(f"  skipped {name}: {e}", file=sys.stderr)
             continue
@@ -255,7 +281,7 @@ def fetch_course_files(course_id: str, limit: int = 25,
         # "UNDEF_LICENSE" when the uploader chose none, "" when the API did
         # not report the relationship at all. Stored with every unit, because
         # the index is a copy of the material and the licence governs the copy.
-        licence = _licence_of(ref)
+        licence = where["licence"]
         kept = 0
         for locator, text in units:
             body = re.sub(r"\s+", " ", text).strip()
@@ -375,8 +401,12 @@ def _folder_of(ref: dict, names: dict[str, str]) -> str:
     return names.get(str(rel.get("id", "")), "")
 
 
-def fetch_course_documents(course_id: str) -> tuple[str, list[dict]]:
+def fetch_course_documents(course_id: str,
+                           scans: list | None = None) -> tuple[str, list[dict]]:
     """Return (course_ref, documents) for a Stud.IP Veranstaltung.
+
+    With a `scans` list, scans and images found among the files are added to
+    it (see `fetch_course_files`).
 
     Indexes, in order of how much substance they usually carry:
 
@@ -456,7 +486,7 @@ def fetch_course_documents(course_id: str) -> tuple[str, list[dict]]:
         pass
 
     # 5. PDF attachments, one document per page.
-    docs.extend(fetch_course_files(course_id, course_name=title))
+    docs.extend(fetch_course_files(course_id, course_name=title, scans=scans))
 
     # Stamp the course name on everything rather than at each of the five call
     # sites above: a document type added later would otherwise silently lose it,
@@ -506,21 +536,27 @@ def index_course(course_id: str, with_media: bool = True) -> dict:
     institution's adapter to upload a lecture recording to a deployment with no
     transcription provider would waste the bandwidth of both.
     """
-    course_ref, docs = fetch_course_documents(course_id)
-    if not docs:
-        raise RuntimeError(f"no indexable text found in Stud.IP course {course_id}")
+    # Scans are only collected when the bridge can read them, for the same
+    # reason as media below: no upload a deployment cannot use.
+    scans: list[dict] | None = [] if _bridge_offers("image_text") else None
+    course_ref, docs = fetch_course_documents(course_id, scans=scans)
 
     media: list[dict] = []
     if with_media and _bridge_can_transcribe():
         media = fetch_course_media(course_id)
 
+    if not docs and not scans and not media:
+        raise RuntimeError(f"no indexable text found in Stud.IP course {course_id}")
+
     payload = {"course_ref": course_ref, "documents": docs, "replace": True}
     if media:
         payload["media"] = media
+    if scans:
+        payload["scans"] = scans
     return bridge_post("/v1/index", payload)
 
 
-def _bridge_can_transcribe() -> bool:
+def _bridge_offers(capability: str) -> bool:
     """Ask the bridge rather than assume. This is what /v1/capabilities is for:
     the same adapter serves deployments with very different infrastructure."""
     try:
@@ -530,9 +566,13 @@ def _bridge_can_transcribe() -> bool:
         )
         with urllib.request.urlopen(req, timeout=10) as r:
             caps = json.loads(r.read().decode("utf-8")).get("capabilities", [])
-        return "transcription" in caps
+        return capability in caps
     except (urllib.error.URLError, RuntimeError, ValueError):
         return False
+
+
+def _bridge_can_transcribe() -> bool:
+    return _bridge_offers("transcription")
 
 
 def ask(course_id: str, question: str) -> dict:
